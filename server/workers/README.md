@@ -14,6 +14,10 @@ Cloudflare's [size and memory limits](https://developers.cloudflare.com/workers/
 apply. The build rejects artifacts at or above 64 MiB. Do not replace the pinned
 workers-go revision without checking the generated runtime and running the tests.
 
+The pinned Miniflare dependency overrides `sharp` to 0.35.5 to fix
+[GHSA-wq5f-xc86-pv6w](https://github.com/advisories/GHSA-wq5f-xc86-pv6w).
+Remove the override when the pinned upstream dependency includes this patch.
+
 ## Build and configure
 
 Install Go matching `server/go.mod` and Node.js supported by Wrangler:
