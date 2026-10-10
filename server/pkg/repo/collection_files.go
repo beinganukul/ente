@@ -7,14 +7,14 @@ import (
 	"fmt"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 func (repo *CollectionRepository) GetCollectionFileIDs(collectionID int64, collectionOwnerID int64) ([]int64, error) {
 	// Collaboration Todo: Filter out files which are not owned by the collection owner
 	rows, err := repo.DB.Query(
-		`SELECT file_id   
+		`SELECT file_id
 			FROM collection_files
 			WHERE is_deleted=false
 				AND collection_id =$1 AND (f_owner_id is null or f_owner_id = $2)`, collectionID, collectionOwnerID)
@@ -53,14 +53,22 @@ func (repo *CollectionRepository) GetCollectionFileState(ctx context.Context, co
 }
 
 func (repo *CollectionRepository) DoAllFilesExistInGivenCollections(fileIDs []int64, cIDs []int64) error {
-	rows, err := repo.DB.Query(`
-        SELECT DISTINCT file_id 
-        FROM collection_files 
-        WHERE file_id = ANY ($1) 
-        AND is_deleted = false 
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`
+        SELECT DISTINCT file_id
+        FROM collection_files
+        WHERE file_id = ANY ($1)
+        AND is_deleted = false
         AND action IS DISTINCT FROM $3
-        AND collection_id = ANY ($2)`,
-		pq.Array(fileIDs), pq.Array(cIDs), ente.ActionRemove)
+        AND collection_id = ANY ($2)`, `
+        SELECT DISTINCT file_id
+        FROM collection_files
+        WHERE file_id IN (SELECT value FROM json_each($1))
+        AND is_deleted = false
+        AND action IS DISTINCT FROM $3
+        AND collection_id IN (SELECT value FROM json_each($2))`), database.Array(repo.DB,
+		fileIDs), database.Array(repo.DB,
+		cIDs), ente.ActionRemove)
 
 	if err != nil {
 		return stacktrace.Propagate(err, "")
@@ -100,8 +108,9 @@ func (repo *CollectionRepository) VerifyAllFileIDsExistsInCollection(ctx context
 		return nil
 	}
 	fileIdMap := make(map[int64]bool)
-	rows, err := repo.DB.QueryContext(ctx, `SELECT file_id FROM collection_files WHERE collection_id = $1 AND is_deleted = $2 AND file_id = ANY ($3) AND action IS DISTINCT FROM $4`,
-		cID, false, pq.Array(fileIDs), ente.ActionRemove)
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT file_id FROM collection_files WHERE collection_id = $1 AND is_deleted = $2 AND file_id = ANY ($3) AND action IS DISTINCT FROM $4`, `SELECT file_id FROM collection_files WHERE collection_id = $1 AND is_deleted = $2 AND file_id IN (SELECT value FROM json_each($3)) AND action IS DISTINCT FROM $4`), cID, false, database.Array(repo.DB,
+		fileIDs), ente.ActionRemove)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -136,8 +145,9 @@ func (repo *CollectionRepository) FilterActiveFileIDsInCollection(ctx context.Co
 		action    string
 	}
 	fileStates := make(map[int64]fileState)
-	rows, err := repo.DB.QueryContext(ctx, `SELECT file_id, is_deleted, COALESCE(action, '') FROM collection_files WHERE collection_id = $1 AND file_id = ANY ($2)`,
-		cID, pq.Array(fileIDs))
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT file_id, is_deleted, COALESCE(action, '') FROM collection_files WHERE collection_id = $1 AND file_id = ANY ($2)`, `SELECT file_id, is_deleted, COALESCE(action, '') FROM collection_files WHERE collection_id = $1 AND file_id IN (SELECT value FROM json_each($2))`), cID, database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}

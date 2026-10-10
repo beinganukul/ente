@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
@@ -32,7 +33,8 @@ func (repo *UserAuthRepository) AddFakeSRPSession(srpUserID uuid.UUID, serverKey
 
 func (repo *UserAuthRepository) GetUnverifiedSessionsInLastHour(srpUserID uuid.UUID) (int64, error) {
 	var count int64
-	err := repo.DB.QueryRow(`SELECT COUNT(*) FROM srp_sessions WHERE srp_user_id = $1 AND has_verified = false AND created_at > (now_utc_micro_seconds() - (60::BIGINT * 60 * 1000 * 1000))`, srpUserID).Scan(&count)
+	err := repo.DB.QueryRow(database.SQL(repo.DB,
+		`SELECT COUNT(*) FROM srp_sessions WHERE srp_user_id = $1 AND has_verified = false AND created_at > (now_utc_micro_seconds() - (60::BIGINT * 60 * 1000 * 1000))`, `SELECT COUNT(*) FROM srp_sessions WHERE srp_user_id = $1 AND has_verified = false AND created_at > (CAST(unixepoch('subsec') * 1000000 AS INTEGER) - (60 * 60 * 1000 * 1000))`), srpUserID).Scan(&count)
 	return count, stacktrace.Propagate(err, "")
 }
 
@@ -126,7 +128,7 @@ func (repo *UserAuthRepository) InsertOrUpdateSRPAuthAndKeyAttr(ctx context.Cont
 		return nil, stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	if err = lockUserForLogin(ctx, tx, userID, nil, nil); err != nil {
+	if err = lockUserForLogin(ctx, repo.DB, tx, userID, nil, nil); err != nil {
 		return nil, err
 	}
 	if len(currentTokenHash) != 0 {
@@ -147,7 +149,8 @@ func (repo *UserAuthRepository) InsertOrUpdateSRPAuthAndKeyAttr(ctx context.Cont
 		if _, err = tx.ExecContext(ctx, `UPDATE users SET is_two_factor_enabled = false WHERE user_id = $1`, userID); err != nil {
 			return nil, stacktrace.Propagate(err, "")
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE passkeys SET friendly_name = id::text, deleted_at = now_utc_micro_seconds() WHERE user_id = $1 AND deleted_at IS NULL`, userID); err != nil {
+		if _, err = tx.ExecContext(ctx, database.SQL(repo.DB,
+			`UPDATE passkeys SET friendly_name = id::text, deleted_at = now_utc_micro_seconds() WHERE user_id = $1 AND deleted_at IS NULL`, `UPDATE passkeys SET friendly_name = id, deleted_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER) WHERE user_id = $1 AND deleted_at IS NULL`), userID); err != nil {
 			return nil, stacktrace.Propagate(err, "")
 		}
 	}
@@ -164,11 +167,10 @@ func (repo *UserAuthRepository) InsertOrUpdateSRPAuthAndKeyAttr(ctx context.Cont
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
-	_, err = tx.ExecContext(ctx, `
-		WITH deleted_two_factor_sessions AS (
-			DELETE FROM two_factor_sessions WHERE user_id = $1
-		)
-		DELETE FROM passkey_login_sessions WHERE user_id = $1 AND ($2 OR verified_at IS NULL)`, userID, clearTokens)
+	if _, err = tx.ExecContext(ctx, `DELETE FROM two_factor_sessions WHERE user_id=$1`, userID); err != nil {
+		return nil, stacktrace.Propagate(err, "")
+	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM passkey_login_sessions WHERE user_id=$1 AND ($2 OR verified_at IS NULL)`, userID, clearTokens)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -180,7 +182,9 @@ func (repo *UserAuthRepository) InsertOrUpdateSRPAuthAndKeyAttr(ctx context.Cont
 			query = `UPDATE tokens SET is_deleted = true WHERE user_id = $1 AND token_hash <> $2 AND is_deleted = false RETURNING app, token_hash`
 			args = append(args, currentTokenHash)
 		}
-		revokedTokens, err = markTokensDeleted(tx, query, args...)
+		revokedTokens, err = markTokensDeleted(repo.DB,
+
+			tx, query, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -226,10 +230,14 @@ func (repo *UserAuthRepository) TrySetSrpSessionVerified(ctx context.Context, se
 }
 
 func (repo *UserAuthRepository) CleanupOldFakeSessions(ctx context.Context) (int64, error) {
-	result, err := repo.DB.ExecContext(ctx, `
+	result, err := repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+		`
 		DELETE FROM srp_sessions
 		WHERE is_fake = true
-		AND created_at < (now_utc_micro_seconds() - (24::BIGINT * 60 * 60 * 1000 * 1000))`)
+		AND created_at < (now_utc_micro_seconds() - (24::BIGINT * 60 * 60 * 1000 * 1000))`, `
+		DELETE FROM srp_sessions
+		WHERE is_fake = true
+		AND created_at < (CAST(unixepoch('subsec') * 1000000 AS INTEGER) - (24 * 60 * 60 * 1000 * 1000))`))
 	if err != nil {
 		return 0, stacktrace.Propagate(err, "failed to cleanup old fake sessions")
 	}
@@ -241,7 +249,7 @@ func (repo *UserAuthRepository) CleanupOldFakeSessions(ctx context.Context) (int
 }
 
 func (repo *UserAuthRepository) GetSRPAttributes(userID int64) (*ente.GetSRPAttributesResponse, error) {
-	row := repo.DB.QueryRow(`SELECT  srp_user_id, salt, mem_limit, ops_limit, kek_salt, email_mfa FROM srp_auth left join key_attributes on srp_auth.user_id = key_attributes.user_id 
+	row := repo.DB.QueryRow(`SELECT  srp_user_id, salt, mem_limit, ops_limit, kek_salt, email_mfa FROM srp_auth left join key_attributes on srp_auth.user_id = key_attributes.user_id
                                                                      left join users on users.user_id = srp_auth.user_id  WHERE srp_auth.user_id = $1`, userID)
 	var srpAttributes ente.GetSRPAttributesResponse
 	err := row.Scan(&srpAttributes.SRPUserID, &srpAttributes.SRPSalt, &srpAttributes.MemLimit, &srpAttributes.OpsLimit, &srpAttributes.KekSalt, &srpAttributes.IsEmailMFAEnabled)

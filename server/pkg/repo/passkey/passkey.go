@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ente/museum/pkg/utils/database"
 	emailUtil "github.com/ente/museum/pkg/utils/email"
 	ente_time "github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
@@ -298,7 +299,8 @@ func (r *Repository) StoreTokenData(sessionID string, tokenData ente.TwoFactorAu
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	_, err = r.DB.Exec(`UPDATE passkey_login_sessions SET token_data = $1, verified_at = now_utc_micro_seconds() WHERE session_id = $2`, tokenDataJson, sessionID)
+	_, err = r.DB.Exec(database.SQL(r.DB,
+		`UPDATE passkey_login_sessions SET token_data = $1, verified_at = now_utc_micro_seconds() WHERE session_id = $2`, `UPDATE passkey_login_sessions SET token_data = $1, verified_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER) WHERE session_id = $2`), tokenDataJson, sessionID)
 	return stacktrace.Propagate(err, "")
 }
 

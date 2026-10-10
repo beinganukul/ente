@@ -10,6 +10,7 @@ import (
 	"github.com/ente/museum/pkg/repo"
 	"github.com/ente/museum/pkg/repo/discountcoupon"
 	emailUtil "github.com/ente/museum/pkg/utils/email"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ente/stacktrace"
 	"github.com/gin-contrib/requestid"
 	"github.com/gin-gonic/gin"
@@ -53,7 +54,7 @@ func (c *Controller) ClaimCoupon(ctx *gin.Context, req ClaimCouponRequest) error
 	if !AllowedProviders[req.ProviderName] {
 		return stacktrace.Propagate(ente.NewBadRequestWithMessage("Invalid provider name"), "")
 	}
-	go c.processClaimRequest(ctx, req)
+	workerjobs.Background(func() { c.processClaimRequest(ctx, req) })
 	return nil
 }
 

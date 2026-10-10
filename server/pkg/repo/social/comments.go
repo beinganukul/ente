@@ -6,8 +6,8 @@ import (
 
 	"github.com/ente/museum/ente"
 	socialentity "github.com/ente/museum/ente/social"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type CommentsRepository struct {
@@ -33,7 +33,8 @@ func (repo *CommentsRepository) Insert(ctx context.Context, comment socialentity
 }
 
 func (repo *CommentsRepository) UpdateCipher(ctx context.Context, id string, collectionID int64, cipher string, nonce string) error {
-	result, err := repo.DB.ExecContext(ctx, `
+	result, err := repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+		`
         UPDATE comments
         SET cipher = $1,
             nonce = $2,
@@ -41,7 +42,15 @@ func (repo *CommentsRepository) UpdateCipher(ctx context.Context, id string, col
         WHERE id = $3
           AND collection_id = $4
           AND is_deleted = FALSE
-    `, cipher, nonce, id, collectionID)
+    `, `
+        UPDATE comments
+        SET cipher = $1,
+            nonce = $2,
+            updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+        WHERE id = $3
+          AND collection_id = $4
+          AND is_deleted = FALSE
+`), cipher, nonce, id, collectionID)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -56,7 +65,8 @@ func (repo *CommentsRepository) UpdateCipher(ctx context.Context, id string, col
 }
 
 func (repo *CommentsRepository) SoftDelete(ctx context.Context, id string) error {
-	result, err := repo.DB.ExecContext(ctx, `
+	result, err := repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+		`
         UPDATE comments
         SET is_deleted = TRUE,
             cipher = NULL,
@@ -64,7 +74,15 @@ func (repo *CommentsRepository) SoftDelete(ctx context.Context, id string) error
             updated_at = now_utc_micro_seconds()
         WHERE id = $1
           AND is_deleted = FALSE
-    `, id)
+    `, `
+        UPDATE comments
+        SET is_deleted = TRUE,
+            cipher = NULL,
+            nonce = NULL,
+            updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+        WHERE id = $1
+          AND is_deleted = FALSE
+`), id)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -79,7 +97,8 @@ func (repo *CommentsRepository) SoftDelete(ctx context.Context, id string) error
 }
 
 func (repo *CommentsRepository) SoftDeleteByCollectionAndUser(ctx context.Context, collectionID int64, userID int64) error {
-	_, err := repo.DB.ExecContext(ctx, `
+	_, err := repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+		`
         UPDATE comments
         SET is_deleted = TRUE,
             cipher = NULL,
@@ -88,7 +107,16 @@ func (repo *CommentsRepository) SoftDeleteByCollectionAndUser(ctx context.Contex
         WHERE collection_id = $1
           AND user_id = $2
           AND is_deleted = FALSE
-    `, collectionID, userID)
+    `, `
+        UPDATE comments
+        SET is_deleted = TRUE,
+            cipher = NULL,
+            nonce = NULL,
+            updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+        WHERE collection_id = $1
+          AND user_id = $2
+          AND is_deleted = FALSE
+`), collectionID, userID)
 	return stacktrace.Propagate(err, "")
 }
 
@@ -140,7 +168,8 @@ func (repo *CommentsRepository) GetByID(ctx context.Context, id string) (*social
 }
 
 func (repo *CommentsRepository) GetDiff(ctx context.Context, collectionID int64, since int64, limit int, fileID *int64) ([]socialentity.Comment, bool, error) {
-	query := `
+	query := database.SQL(repo.DB,
+		`
         SELECT id, collection_id, file_id, parent_comment_id, user_id, anon_user_id, cipher, nonce, is_deleted, created_at, updated_at
         FROM comments
         WHERE collection_id = $1
@@ -148,7 +177,15 @@ func (repo *CommentsRepository) GetDiff(ctx context.Context, collectionID int64,
           AND ($3::BIGINT IS NULL OR file_id IS NOT DISTINCT FROM $3::BIGINT)
         ORDER BY updated_at ASC
         LIMIT $4
-    `
+    `, `
+        SELECT id, collection_id, file_id, parent_comment_id, user_id, anon_user_id, cipher, nonce, is_deleted, created_at, updated_at
+        FROM comments
+        WHERE collection_id = $1
+          AND updated_at > $2
+          AND ($3 IS NULL OR file_id IS NOT DISTINCT FROM $3)
+        ORDER BY updated_at ASC
+        LIMIT $4
+`)
 	rows, err := repo.DB.QueryContext(ctx, query, collectionID, since, fileID, limit+1)
 	if err != nil {
 		return nil, false, stacktrace.Propagate(err, "")
@@ -214,13 +251,21 @@ func (repo *CommentsRepository) CountActiveByCollection(ctx context.Context, col
 	if len(collectionIDs) == 0 {
 		return counts, nil
 	}
-	rows, err := repo.DB.QueryContext(ctx, `
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`
         SELECT collection_id, COUNT(*)
         FROM comments
         WHERE collection_id = ANY($1)
           AND is_deleted = FALSE
         GROUP BY collection_id
-    `, pq.Array(collectionIDs))
+    `, `
+        SELECT collection_id, COUNT(*)
+        FROM comments
+        WHERE collection_id IN (SELECT value FROM json_each($1))
+          AND is_deleted = FALSE
+        GROUP BY collection_id
+`), database.Array(repo.DB,
+		collectionIDs))
 	if err != nil {
 		return counts, stacktrace.Propagate(err, "")
 	}
@@ -244,12 +289,19 @@ func (repo *CommentsRepository) LatestUpdateByCollection(ctx context.Context, co
 	if len(collectionIDs) == 0 {
 		return results, nil
 	}
-	rows, err := repo.DB.QueryContext(ctx, `
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`
         SELECT collection_id, MAX(updated_at)
         FROM comments
         WHERE collection_id = ANY($1)
         GROUP BY collection_id
-    `, pq.Array(collectionIDs))
+    `, `
+        SELECT collection_id, MAX(updated_at)
+        FROM comments
+        WHERE collection_id IN (SELECT value FROM json_each($1))
+        GROUP BY collection_id
+`), database.Array(repo.DB,
+		collectionIDs))
 	if err != nil {
 		return results, stacktrace.Propagate(err, "")
 	}

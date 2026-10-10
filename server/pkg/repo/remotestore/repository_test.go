@@ -29,7 +29,7 @@ func TestCustomDomainCanonicalUniqueness(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ownerID, *resolvedOwnerID)
 
-	err = repository.InsertOrUpdateCustomDomain(t.Context(), otherID, "bu\u0308cher.example")
+	err = repository.InsertOrUpdateCustomDomain(t.Context(), otherID, "bücher.example")
 	var apiErr *ente.ApiError
 	require.ErrorAs(t, err, &apiErr)
 	require.Equal(t, ente.CONFLICT, apiErr.Code)

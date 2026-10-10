@@ -168,6 +168,28 @@ func TestFindScheduledByEmailHash(t *testing.T) {
 	}
 }
 
+func TestDeleteTableDataRollsBackOnLaterFailure(t *testing.T) {
+	testutil.WithServerRoot(t)
+	db := testutil.RequireTestDB(t)
+	testutil.ResetTables(t, db)
+	t.Cleanup(func() {
+		mustExecCleanupTest(t, db, `DROP TABLE IF EXISTS cleanup_rollback_guard`)
+		testutil.ResetTables(t, db)
+	})
+	userID := testutil.InsertUser(t, db, testutil.UserFixture{UserID: 1, Email: "rollback@example.com", CreationTime: 1})
+	otherID := testutil.InsertUser(t, db, testutil.UserFixture{UserID: 2, Email: "other@example.com", CreationTime: 1})
+	mustExecCleanupTest(t, db, `INSERT INTO authenticator_key(user_id, encrypted_key, header) VALUES($1, 'key', 'header')`, userID)
+	mustExecCleanupTest(t, db, `INSERT INTO contact_entity(id, user_id, contact_user_id, encrypted_key, encrypted_data) VALUES('guarded', $1, $2, $3, $4)`, userID, otherID, []byte("key"), []byte("data"))
+	// A later foreign-key failure must restore keys deleted earlier in the stage.
+	mustExecCleanupTest(t, db, `CREATE TABLE cleanup_rollback_guard (id TEXT PRIMARY KEY REFERENCES contact_entity(id))`)
+	mustExecCleanupTest(t, db, `INSERT INTO cleanup_rollback_guard VALUES('guarded')`)
+	if err := (&Repository{DB: db}).DeleteTableData(t.Context(), userID); err == nil {
+		t.Fatal("cleanup unexpectedly succeeded with a restricted contact")
+	}
+	assertCleanupRowCount(t, db, `SELECT COUNT(*) FROM authenticator_key WHERE user_id=$1`, userID, 1)
+	assertCleanupRowCount(t, db, `SELECT COUNT(*) FROM contact_entity WHERE user_id=$1`, userID, 1)
+}
+
 func mustExecCleanupTest(t *testing.T, db *sql.DB, query string, args ...any) {
 	t.Helper()
 	if _, err := db.Exec(query, args...); err != nil {

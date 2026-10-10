@@ -3,6 +3,7 @@ package controller
 import (
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"strings"
 	stime "time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/pkg/repo"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/s3config"
 	"github.com/ente/museum/pkg/utils/time"
 	log "github.com/sirupsen/logrus"
@@ -48,6 +50,10 @@ func (c *ObjectCleanupController) StartRemovingUnreportedObjects() {
 		return
 	}
 
+	if workerjobs.Register("@every 1m", func() { c.removeUnreportedObjects() }) {
+		return
+	}
+
 	workerCount := viper.GetInt("jobs.remove-unreported-objects.worker-count")
 	if workerCount == 0 {
 		workerCount = 1
@@ -72,6 +78,9 @@ func (c *ObjectCleanupController) removeUnreportedObjectsWorker(i int) {
 }
 
 func (c *ObjectCleanupController) removeUnreportedObjects() int {
+	if database.IsTurso(c.Repo.DB) {
+		return c.removeClaimedUnreportedObjects()
+	}
 	logger := log.WithFields(log.Fields{
 		"task": "remove-unreported-objects",
 	})
@@ -103,6 +112,39 @@ func (c *ObjectCleanupController) removeUnreportedObjects() int {
 		logger.Error(cerr)
 	}
 
+	return count
+}
+
+func (c *ObjectCleanupController) removeClaimedUnreportedObjects() int {
+	objects, claim, err := c.Repo.ClaimExpiredObjects()
+	if err != nil {
+		log.WithError(err).Error("Failed to claim expired temporary objects")
+		return 0
+	}
+	count := 0
+	for _, object := range objects {
+		dc := object.BucketId
+		if dc == "" {
+			dc = c.S3Config.GetHotDataCenter()
+		}
+		if object.IsMultipart {
+			err = c.abortMultipartUpload(object.ObjectKey, object.UploadID, dc)
+		}
+		if err == nil {
+			err = c.DeleteObjectFromDataCenter(object.ObjectKey, dc)
+		}
+		if err == nil {
+			err = c.Repo.FinishClaimedObject(object, claim)
+		}
+		if err != nil {
+			log.WithError(err).WithField("object_key", object.ObjectKey).Error("Claimed object cleanup failed")
+			if delayErr := c.Repo.DelayClaimedObject(object, claim, time.MicrosecondsAfterDays(1)); delayErr != nil {
+				log.WithError(delayErr).Error("Failed to delay claimed object cleanup")
+			}
+			continue
+		}
+		count++
+	}
 	return count
 }
 
@@ -172,6 +214,7 @@ func (c *ObjectCleanupController) AddTempObject(object ente.TempObject) error {
 	return stacktrace.Propagate(err, "")
 }
 
+// shortcut: prefix deletion is unbounded; persist partial progress before supporting large prefixes on Workers.
 func (c *ObjectCleanupController) DeleteAllObjectsWithPrefix(prefix string, dc string) error {
 	s3Client := c.S3Config.GetS3Client(dc)
 	bucket := c.S3Config.GetBucket(dc)

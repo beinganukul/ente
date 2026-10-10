@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/ente/museum/ente/base"
-	"github.com/lib/pq"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/spf13/viper"
 
 	"github.com/ente/museum/ente"
@@ -69,8 +69,8 @@ func (pcr *FileLinkRepository) Insert(
 		return nil, stacktrace.Propagate(err, "failed to generate new ID for public file token")
 	}
 
-	_, err = tx.ExecContext(ctx, `INSERT INTO public_file_tokens 
-    (id, file_id, owner_id, access_token, app, encrypted_file_key, encrypted_file_key_nonce, kdf_nonce, kdf_mem_limit, kdf_ops_limit, encrypted_share_key) 
+	_, err = tx.ExecContext(ctx, `INSERT INTO public_file_tokens
+    (id, file_id, owner_id, access_token, app, encrypted_file_key, encrypted_file_key_nonce, kdf_nonce, kdf_mem_limit, kdf_ops_limit, encrypted_share_key)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		id,
 		req.FileID,
@@ -85,7 +85,7 @@ func (pcr *FileLinkRepository) Insert(
 		req.EncryptedShareKey,
 	)
 	if err != nil {
-		if err.Error() == "pq: duplicate key value violates unique constraint \"public_active_file_link_unique_idx\"" {
+		if database.IsUniqueViolationFor(err, "public_active_file_link_unique_idx", "public_file_tokens.file_id, public_file_tokens.is_disabled") {
 			return nil, ente.ErrActiveLinkAlreadyExists
 		}
 		return nil, stacktrace.Propagate(err, "failed to insert")
@@ -133,9 +133,9 @@ func (pcr *FileLinkRepository) UpdateLinkSecretIfEmpty(
 
 // "Active" only means not disabled; the link may be expired or over its limit.
 func (pcr *FileLinkRepository) GetActiveFileUrlToken(ctx context.Context, fileID int64) (*ente.FileLinkRow, error) {
-	row := pcr.DB.QueryRowContext(ctx, `SELECT id, file_id, owner_id, access_token, valid_till, device_limit, 
+	row := pcr.DB.QueryRowContext(ctx, `SELECT id, file_id, owner_id, access_token, valid_till, device_limit,
        is_disabled, pw_hash, pw_nonce, mem_limit, ops_limit, enable_download,
-       encrypted_file_key, encrypted_file_key_nonce, kdf_nonce, kdf_mem_limit, kdf_ops_limit, encrypted_share_key FROM 
+       encrypted_file_key, encrypted_file_key_nonce, kdf_nonce, kdf_mem_limit, kdf_ops_limit, encrypted_share_key FROM
                                                    public_file_tokens WHERE file_id = $1 and is_disabled = FALSE`,
 		fileID)
 
@@ -179,7 +179,7 @@ func (pcr *FileLinkRepository) GetFileUrls(ctx context.Context, userID int64, si
 }
 
 func (pcr *FileLinkRepository) DisableLinkForFiles(ctx context.Context, fileIDs []int64) error {
-	accessTokens, err := disableLinkForFiles(ctx, pcr.DB, fileIDs)
+	accessTokens, err := disableLinkForFiles(ctx, pcr.DB, pcr.DB, fileIDs)
 	if err != nil {
 		return err
 	}
@@ -188,15 +188,18 @@ func (pcr *FileLinkRepository) DisableLinkForFiles(ctx context.Context, fileIDs 
 }
 
 func (pcr *FileLinkRepository) DisableLinkForFilesTx(ctx context.Context, tx *sql.Tx, fileIDs []int64) ([]string, error) {
-	return disableLinkForFiles(ctx, tx, fileIDs)
+	return disableLinkForFiles(ctx, pcr.DB, tx, fileIDs)
 }
 
-func disableLinkForFiles(ctx context.Context, updater fileLinkUpdater, fileIDs []int64) ([]string, error) {
+func disableLinkForFiles(ctx context.Context, db *sql.DB, updater fileLinkUpdater, fileIDs []int64) ([]string, error) {
 	if len(fileIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := updater.QueryContext(ctx, `UPDATE public_file_tokens SET is_disabled = TRUE
-		WHERE file_id = ANY($1) AND is_disabled IS FALSE RETURNING access_token`, pq.Array(fileIDs))
+	rows, err := updater.QueryContext(ctx, database.SQL(db,
+		`UPDATE public_file_tokens SET is_disabled = TRUE
+		WHERE file_id = ANY($1) AND is_disabled IS FALSE RETURNING access_token`, `UPDATE public_file_tokens SET is_disabled = TRUE
+		WHERE file_id IN (SELECT value FROM json_each($1)) AND is_disabled IS FALSE RETURNING access_token`), database.Array(db,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to disable public file links")
 	}
@@ -282,7 +285,7 @@ func (pcr *FileLinkRepository) GetFileUrlRowByFileID(ctx context.Context, fileID
 	row := pcr.DB.QueryRowContext(ctx,
 		`SELECT id, file_id, access_token, owner_id, is_disabled, enable_download, valid_till, device_limit, pw_hash, pw_nonce, mem_limit, ops_limit,
 	   created_at, updated_at, encrypted_file_key, encrypted_file_key_nonce, kdf_nonce, kdf_mem_limit, kdf_ops_limit, encrypted_share_key
-		from public_file_tokens 
+		from public_file_tokens
 		where file_id = $1 and is_disabled = FALSE`, fileID)
 	var result = ente.FileLinkRow{}
 	err := row.Scan(&result.LinkID, &result.FileID, &result.Token, &result.OwnerID, &result.IsDisabled, &result.EnableDownload, &result.ValidTill, &result.DeviceLimit, &result.PassHash, &result.Nonce, &result.MemLimit, &result.OpsLimit, &result.CreatedAt, &result.UpdatedAt, &result.EncryptedFileKey, &result.EncryptedFileKeyNonce, &result.KdfNonce, &result.KdfMemLimit, &result.KdfOpsLimit, &result.EncryptedShareKey)
@@ -296,8 +299,8 @@ func (pcr *FileLinkRepository) GetFileUrlRowByFileID(ctx context.Context, fileID
 }
 
 func (pcr *FileLinkRepository) UpdateLink(ctx context.Context, pct ente.FileLinkRow) error {
-	_, err := pcr.DB.ExecContext(ctx, `UPDATE public_file_tokens SET valid_till = $1, device_limit = $2, 
-                                    pw_hash = $3, pw_nonce = $4, mem_limit = $5, ops_limit = $6, enable_download = $7  
+	_, err := pcr.DB.ExecContext(ctx, `UPDATE public_file_tokens SET valid_till = $1, device_limit = $2,
+                                    pw_hash = $3, pw_nonce = $4, mem_limit = $5, ops_limit = $6, enable_download = $7
                                 where id = $8`,
 		pct.ValidTill, pct.DeviceLimit, pct.PassHash, pct.Nonce, pct.MemLimit, pct.OpsLimit, pct.EnableDownload, pct.LinkID)
 	if err != nil {
@@ -318,10 +321,12 @@ func (pcr *FileLinkRepository) GetUniqueAccessCount(ctx context.Context, linkId 
 }
 
 func (pcr *FileLinkRepository) RecordAccessHistory(ctx context.Context, shareID string, ip string, ua string) error {
-	_, err := pcr.DB.ExecContext(ctx, `INSERT INTO public_file_tokens_access_history 
-    (id, ip, user_agent) VALUES ($1, $2, $3) 
-    ON CONFLICT ON CONSTRAINT unique_access_id_ip_ua DO NOTHING;`,
-		shareID, ip, ua)
+	_, err := pcr.DB.ExecContext(ctx, database.SQL(pcr.DB,
+		`INSERT INTO public_file_tokens_access_history
+    (id, ip, user_agent) VALUES ($1, $2, $3)
+    ON CONFLICT ON CONSTRAINT unique_access_id_ip_ua DO NOTHING;`, `INSERT INTO public_file_tokens_access_history
+    (id, ip, user_agent) VALUES ($1, $2, $3)
+    ON CONFLICT (id, ip, user_agent) DO NOTHING;`), shareID, ip, ua)
 	return stacktrace.Propagate(err, "failed to record access history")
 }
 
@@ -337,7 +342,8 @@ func (pcr *FileLinkRepository) AccessedInPast(ctx context.Context, shareID strin
 }
 
 func (pcr *FileLinkRepository) CleanupAccessHistory(ctx context.Context) error {
-	_, err := pcr.DB.ExecContext(ctx, `DELETE FROM public_file_tokens_access_history WHERE id IN (SELECT id FROM public_file_tokens WHERE is_disabled = TRUE AND updated_at < (now_utc_micro_seconds() - (24::BIGINT * 30 * 60 * 60 * 1000 * 1000)))`)
+	_, err := pcr.DB.ExecContext(ctx, database.SQL(pcr.DB,
+		`DELETE FROM public_file_tokens_access_history WHERE id IN (SELECT id FROM public_file_tokens WHERE is_disabled = TRUE AND updated_at < (now_utc_micro_seconds() - (24::BIGINT * 30 * 60 * 60 * 1000 * 1000)))`, `DELETE FROM public_file_tokens_access_history WHERE id IN (SELECT id FROM public_file_tokens WHERE is_disabled = TRUE AND updated_at < (CAST(unixepoch('subsec') * 1000000 AS INTEGER) - (24 * 30 * 60 * 60 * 1000 * 1000)))`))
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to clean up public file access history")
 	}

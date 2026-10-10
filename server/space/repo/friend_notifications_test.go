@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/stretchr/testify/require"
 )
 
@@ -217,14 +218,17 @@ func TestFriendAcceptanceNotificationsGroupByActor(t *testing.T) {
 
 func TestFriendNotificationsMigrationPreservesRequestsAndAcceptanceReadState(t *testing.T) {
 	module := newSpaceTestModule(t)
+	if database.IsTurso(module.Spaces.DB) {
+		t.Skip("PostgreSQL historical migration; SQLite starts from current baseline")
+	}
 	ctx := t.Context()
 	alice, bob := notificationTestSpaces(t, module)
 	postID, err := testCreatePost(ctx, module, alice.OwnerID, alice.SpaceID, "key", nil, 1, nil)
 	require.NoError(t, err)
 	require.NoError(t, testSetPostLike(ctx, module, postID, bob.SpaceID, true))
-	up, err := os.ReadFile("migrations/150_space_notifications.up.sql")
+	up, err := os.ReadFile("migrations/postgres/150_space_notifications.up.sql")
 	require.NoError(t, err)
-	down, err := os.ReadFile("migrations/150_space_notifications.down.sql")
+	down, err := os.ReadFile("migrations/postgres/150_space_notifications.down.sql")
 	require.NoError(t, err)
 	tx, err := module.Notifications.DB.BeginTx(ctx, nil)
 	require.NoError(t, err)

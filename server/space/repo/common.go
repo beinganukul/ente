@@ -1,10 +1,12 @@
 package repo
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -76,16 +78,16 @@ func spaceActorSelectColumns(spaceAlias string, avatarAlias string, prefix strin
 	}, ",\n\t")
 }
 
-func spaceActorPublicSelectColumns(spaceAlias string, prefix string) string {
+func spaceActorPublicSelectColumns(db *sql.DB, spaceAlias string, prefix string) string {
 	return strings.Join([]string{
 		fmt.Sprintf("%s.space_id AS %s_space_id", spaceAlias, prefix),
 		fmt.Sprintf("%s.space_slug AS %s_space_slug", spaceAlias, prefix),
 		fmt.Sprintf("%s.public_key AS %s_public_key", spaceAlias, prefix),
 		fmt.Sprintf("%s.current_version AS %s_current_version", spaceAlias, prefix),
-		fmt.Sprintf("'\\x'::bytea AS %s_encrypted_profile", prefix),
-		fmt.Sprintf("NULL::text AS %s_avatar_object_id", prefix),
-		fmt.Sprintf("NULL::integer AS %s_avatar_key_version", prefix),
-		fmt.Sprintf("NULL::bigint AS %s_avatar_size", prefix),
+		fmt.Sprintf(database.SQL(db, "'\\x'::bytea AS %s_encrypted_profile", "X'' AS %s_encrypted_profile"), prefix),
+		fmt.Sprintf("NULL AS %s_avatar_object_id", prefix),
+		fmt.Sprintf("NULL AS %s_avatar_key_version", prefix),
+		fmt.Sprintf("NULL AS %s_avatar_size", prefix),
 		fmt.Sprintf("%s.updated_at AS %s_updated_at", spaceAlias, prefix),
 	}, ",\n\t")
 }
@@ -98,7 +100,7 @@ func wrapUnique(err error, message string) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "duplicate key value") {
+	if database.IsUniqueViolation(err) {
 		return ente.NewAlreadyExistsError(message)
 	}
 	return stacktrace.Propagate(err, "")

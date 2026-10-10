@@ -9,12 +9,16 @@ import (
 	"github.com/ente/museum/ente/filedata"
 	fileDataRepo "github.com/ente/museum/pkg/repo/filedata"
 	enteTime "github.com/ente/museum/pkg/utils/time"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 
 	log "github.com/sirupsen/logrus"
 	"time"
 )
 
 func (c *Controller) StartDataDeletion() {
+	if workerjobs.Register("@every 1m", func() { _ = c.tryDelete() }) {
+		return
+	}
 	go c.startDeleteWorkers(1)
 }
 

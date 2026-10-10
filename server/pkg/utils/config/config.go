@@ -78,13 +78,18 @@ func doesFileExist(path string) (bool, error) {
 func GetPGInfo() string {
 	return fmt.Sprintf("host=%s port=%d user=%s "+
 		"password=%s dbname=%s sslmode=%s %s",
-		viper.GetString("db.host"),
+		quotePGValue(viper.GetString("db.host")),
 		viper.GetInt("db.port"),
-		viper.GetString("db.user"),
-		viper.GetString("db.password"),
-		viper.GetString("db.name"),
-		viper.GetString("db.sslmode"),
+		quotePGValue(viper.GetString("db.user")),
+		quotePGValue(viper.GetString("db.password")),
+		quotePGValue(viper.GetString("db.name")),
+		quotePGValue(viper.GetString("db.sslmode")),
 		viper.GetString("db.extra"))
+}
+
+func quotePGValue(value string) string {
+	// lib/pq's keyword DSNs require quoted empty values and backslash escaping.
+	return "'" + strings.NewReplacer("\\", "\\\\", "'", "\\'").Replace(value) + "'"
 }
 
 func IsLocalEnvironment() bool {
@@ -120,7 +125,7 @@ func productionFilePath(path string) (string, error) {
 	if pathExists {
 		return path, nil
 	}
-	if IsLocalEnvironment() {
+	if IsLocalEnvironment() || os.Getenv("ENVIRONMENT") == "workers" {
 		return "", nil
 	}
 	return "", fmt.Errorf("required file not found at %s", path)

@@ -3,6 +3,7 @@ package repo
 import (
 	"testing"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,7 +62,7 @@ func TestUnreadActivitiesAreScopedAndPaginated(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, hidden)
 	require.NoError(t, module.Friends.DeleteFriendship(ctx, alice.SpaceID, bob.SpaceID))
-	_, err = module.Spaces.DB.ExecContext(ctx, `UPDATE users SET encrypted_email = '\x00'::bytea WHERE user_id = $1`, bob.OwnerID)
+	_, err = module.Spaces.DB.ExecContext(ctx, database.SQL(module.Spaces.DB, `UPDATE users SET encrypted_email = '\x00'::bytea WHERE user_id = $1`, `UPDATE users SET encrypted_email = X'00' WHERE user_id = $1`), bob.OwnerID)
 	require.NoError(t, err)
 	hidden, _, err = module.Read.ListUnreadActivities(ctx, alice.SpaceID, "", 2)
 	require.NoError(t, err)

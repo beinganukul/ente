@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"errors"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type UsageRepository struct {
@@ -67,8 +67,9 @@ func (repo *UsageRepository) CreateTx(ctx context.Context, tx *sql.Tx, userID in
 }
 
 func (repo *UsageRepository) GetCombinedUsage(ctx context.Context, userIDs []int64) (int64, error) {
-	row := repo.DB.QueryRowContext(ctx, `SELECT coalesce(sum(storage_consumed),0) FROM usage WHERE user_id = ANY($1)`,
-		pq.Array(userIDs))
+	row := repo.DB.QueryRowContext(ctx, database.SQL(repo.DB,
+		`SELECT coalesce(sum(storage_consumed),0) FROM usage WHERE user_id = ANY($1)`, `SELECT coalesce(sum(storage_consumed),0) FROM usage WHERE user_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		userIDs))
 	var totalUsage int64
 	err := row.Scan(&totalUsage)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -138,9 +139,13 @@ func (repo *UsageRepository) getLockerUsage(ctx context.Context, userIDs []int64
 	}
 
 	if includeFileCounts {
-		rows, err := repo.DB.QueryContext(ctx, `SELECT requested.user_id, u.locker_file_count
+		rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+			`SELECT requested.user_id, u.locker_file_count
 			FROM unnest($1::bigint[]) AS requested(user_id)
-			LEFT JOIN usage AS u ON u.user_id = requested.user_id`, pq.Array(userIDs))
+			LEFT JOIN usage AS u ON u.user_id = requested.user_id`, `SELECT requested.value, u.locker_file_count
+			FROM json_each($1) AS requested
+			LEFT JOIN usage AS u ON u.user_id = requested.value`), database.Array(repo.DB,
+			userIDs))
 		if err != nil {
 			return nil, stacktrace.Propagate(err, "")
 		}
@@ -168,12 +173,19 @@ func (repo *UsageRepository) getLockerUsage(ctx context.Context, userIDs []int64
 		}
 
 		if len(uninitializedUserIDs) > 0 {
-			rows, err = repo.DB.QueryContext(ctx, `SELECT c.owner_id, COUNT(DISTINCT cf.file_id)
+			rows, err = repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+				`SELECT c.owner_id, COUNT(DISTINCT cf.file_id)
 				FROM collections AS c
 				JOIN collection_files AS cf ON c.collection_id = cf.collection_id
 				WHERE c.app = 'locker' AND c.owner_id = ANY($1)
 					AND cf.f_owner_id = c.owner_id AND cf.is_deleted = FALSE
-				GROUP BY c.owner_id`, pq.Array(uninitializedUserIDs))
+				GROUP BY c.owner_id`, `SELECT c.owner_id, COUNT(DISTINCT cf.file_id)
+				FROM collections AS c
+				JOIN collection_files AS cf ON c.collection_id = cf.collection_id
+				WHERE c.app = 'locker' AND c.owner_id IN (SELECT value FROM json_each($1))
+					AND cf.f_owner_id = c.owner_id AND cf.is_deleted = FALSE
+				GROUP BY c.owner_id`), database.Array(repo.DB,
+				uninitializedUserIDs))
 			if err != nil {
 				return nil, stacktrace.Propagate(err, "")
 			}
@@ -191,8 +203,9 @@ func (repo *UsageRepository) getLockerUsage(ctx context.Context, userIDs []int64
 		}
 	}
 
-	sizeQuery := `
-      SELECT 
+	sizeQuery := database.SQL(repo.DB,
+		`
+      SELECT
          unique_files.owner_id,
          COALESCE(SUM(ok.size), 0) AS total_size
       FROM (
@@ -205,9 +218,24 @@ func (repo *UsageRepository) getLockerUsage(ctx context.Context, userIDs []int64
       ) AS unique_files
       LEFT JOIN object_keys ok ON ok.file_id = unique_files.file_id AND ok.is_deleted = false
       GROUP BY unique_files.owner_id;
-   `
+   `, `
+      SELECT
+         unique_files.owner_id,
+         COALESCE(SUM(ok.size), 0) AS total_size
+      FROM (
+         SELECT DISTINCT c.owner_id, cf.file_id
+         FROM collections c
+         JOIN collection_files cf ON c.collection_id = cf.collection_id
+         WHERE c.app = 'locker'
+            AND c.owner_id IN (SELECT value FROM json_each($1))
+            AND cf.f_owner_id = c.owner_id
+      ) AS unique_files
+      LEFT JOIN object_keys ok ON ok.file_id = unique_files.file_id AND ok.is_deleted = false
+      GROUP BY unique_files.owner_id;
+`)
 
-	rows, err := repo.DB.QueryContext(ctx, sizeQuery, pq.Array(userIDs))
+	rows, err := repo.DB.QueryContext(ctx, sizeQuery, database.Array(repo.DB,
+		userIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}

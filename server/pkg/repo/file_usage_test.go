@@ -84,7 +84,7 @@ func TestApplyUsageChangeRequiresUsageRow(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	_, err = applyUsageChange(t.Context(), tx, userID, usageChange{StorageDelta: 5, PhotosFileDelta: 1})
+	_, err = applyUsageChange(t.Context(), db, tx, userID, usageChange{StorageDelta: 5, PhotosFileDelta: 1})
 	if err == nil {
 		t.Fatal("applyUsageChange() created a missing usage row")
 	}

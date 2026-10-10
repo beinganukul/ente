@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ente/museum/internal/testutil"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/google/uuid"
 )
 
@@ -46,10 +47,10 @@ func insertStorageWarningTestUsage(t *testing.T, db *sql.DB, userID int64, usage
 
 func insertStorageWarningTestSubscription(t *testing.T, db *sql.DB, userID int64, productID string) {
 	t.Helper()
-	_, err := db.Exec(
+	_, err := db.Exec(database.SQL(db,
 		`INSERT INTO subscriptions(user_id, storage, original_transaction_id, expiry_time, product_id, payment_provider, latest_verification_data, attributes)
-		 VALUES($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
-		userID,
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`, `INSERT INTO subscriptions(user_id, storage, original_transaction_id, expiry_time, product_id, payment_provider, latest_verification_data, attributes)
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8)`), userID,
 		100*testGiB,
 		fmt.Sprintf("txn-%d", userID),
 		int64(1),

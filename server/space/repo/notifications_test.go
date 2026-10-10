@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/stretchr/testify/require"
 )
 
@@ -119,9 +119,11 @@ func TestPostLikeAndReplyDoNotDeadlock(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback()
 	var pid int
-	require.NoError(t, tx.QueryRowContext(ctx, `
+	if !database.IsTurso(module.Spaces.DB) {
+		require.NoError(t, tx.QueryRowContext(ctx, `
 		SELECT pg_backend_pid() FROM spaces WHERE space_id = $1 FOR UPDATE
 	`, bob.SpaceID).Scan(&pid))
+	}
 	result := make(chan error, 1)
 	go func() {
 		defer close(result)
@@ -133,18 +135,26 @@ func TestPostLikeAndReplyDoNotDeadlock(t *testing.T) {
 		for range result {
 		}
 	})
-	for {
-		var waiting bool
-		require.NoError(t, module.Messages.DB.QueryRowContext(ctx, `
+	if database.IsTurso(module.Spaces.DB) {
+		select {
+		case err := <-result:
+			t.Fatalf("operation escaped writer lock: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+	} else {
+		for {
+			var waiting bool
+			require.NoError(t, module.Messages.DB.QueryRowContext(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
 				AND $1 = ANY(pg_blocking_pids(pid))
 			)
 		`, pid).Scan(&waiting))
-		if waiting {
-			break
+			if waiting {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO space_messages (
@@ -222,7 +232,7 @@ func TestNotificationsPaginateCompletePostGroups(t *testing.T) {
 		for j, actor := range actors[:count] {
 			require.NoError(t, testSetPostLike(ctx, module, postID, actor.SpaceID, true))
 			_, err = module.Notifications.DB.ExecContext(ctx, `
-				UPDATE space_notifications n SET created_at = $1
+				UPDATE space_notifications AS n SET created_at = $1
 				FROM space_post_likes l WHERE l.like_id = n.post_like_id AND l.post_id = $2 AND l.actor_space_id = $3
 			`, (3-i)*1000+j, postID, actor.SpaceID)
 			require.NoError(t, err)
@@ -280,7 +290,7 @@ func TestNotificationsPaginateCompletePostGroups(t *testing.T) {
 	require.Equal(t, int64(24), updated[0].ActorCount)
 	require.Equal(t, actors[24].SpaceID, updated[0].Actors[0].SpaceID)
 	require.False(t, updated[0].Unread)
-	_, err = module.Notifications.DB.ExecContext(ctx, `UPDATE space_notifications SET read_at = NULL WHERE actor_space_id = ANY($1)`, pq.Array([]string{actors[24].SpaceID, actors[23].SpaceID}))
+	_, err = module.Notifications.DB.ExecContext(ctx, database.SQL(module.Spaces.DB, `UPDATE space_notifications SET read_at = NULL WHERE actor_space_id = ANY($1)`, `UPDATE space_notifications SET read_at = NULL WHERE actor_space_id IN (SELECT value FROM json_each($1))`), database.Array(module.Spaces.DB, []string{actors[24].SpaceID, actors[23].SpaceID}))
 	require.NoError(t, err)
 	require.NoError(t, module.Friends.DeleteFriendship(ctx, alice.SpaceID, actors[24].SpaceID))
 	_, err = module.Notifications.DB.ExecContext(ctx, `UPDATE users SET encrypted_email = NULL WHERE user_id = $1`, actors[23].OwnerID)
@@ -318,28 +328,47 @@ func TestNotificationsLargeLikeGroup(t *testing.T) {
 	require.NoError(t, err)
 	_, err = module.Pokes.Create(ctx, bob.SpaceID, alice.SpaceID, "older")
 	require.NoError(t, err)
-	_, err = module.Spaces.DB.ExecContext(ctx, `
+	_, err = module.Spaces.DB.ExecContext(ctx, database.SQL(module.Spaces.DB, `
 		INSERT INTO spaces (space_id, owner_id, space_slug, root_wrapped_space_key, public_key, encrypted_secret_key)
 		SELECT 'large-group-' || i, $1, 'large_group_' || i, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea
 		FROM generate_series(1, 2000) i
-	`, bob.OwnerID)
+	`, `WITH RECURSIVE series(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM series WHERE i < 2000)
+
+		INSERT INTO spaces (space_id, owner_id, space_slug, root_wrapped_space_key, public_key, encrypted_secret_key)
+		SELECT 'large-group-' || i, $1, 'large_group_' || i, X'00', X'00', X'00'
+		FROM series
+	`), bob.OwnerID)
 	require.NoError(t, err)
-	_, err = module.Friends.DB.ExecContext(ctx, `
+	_, err = module.Friends.DB.ExecContext(ctx, database.SQL(module.Spaces.DB, `
 		INSERT INTO space_friend_shares (space_id, friend_space_id, friend_sealed_space_key, key_version)
 		SELECT $1, 'large-group-' || i, '\x00'::bytea, 1 FROM generate_series(1, 2000) i
-	`, alice.SpaceID)
+	`, `WITH RECURSIVE series(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM series WHERE i < 2000)
+
+		INSERT INTO space_friend_shares (space_id, friend_space_id, friend_sealed_space_key, key_version)
+		SELECT $1, 'large-group-' || i, X'00', 1 FROM series
+	`), alice.SpaceID)
 	require.NoError(t, err)
-	_, err = module.Posts.DB.ExecContext(ctx, `
+	_, err = module.Posts.DB.ExecContext(ctx, database.SQL(module.Spaces.DB, `
 		INSERT INTO space_post_likes (like_id, post_id, actor_space_id)
 		SELECT 'large-like-' || i, $1, 'large-group-' || i FROM generate_series(1, 2000) i
-	`, postID)
+	`, `WITH RECURSIVE series(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM series WHERE i < 2000)
+
+		INSERT INTO space_post_likes (like_id, post_id, actor_space_id)
+		SELECT 'large-like-' || i, $1, 'large-group-' || i FROM series
+	`), postID)
 	require.NoError(t, err)
-	_, err = module.Notifications.DB.ExecContext(ctx, `
+	_, err = module.Notifications.DB.ExecContext(ctx, database.SQL(module.Spaces.DB, `
 		INSERT INTO space_notifications (notification_id, recipient_space_id, actor_space_id, kind, post_like_id, read_at)
 		SELECT 'large-notification-' || i, $1, 'large-group-' || i, 'post_like', 'large-like-' || i,
 			CASE WHEN i = 1 THEN NULL ELSE now_utc_micro_seconds() END
 		FROM generate_series(1, 2000) i
-	`, alice.SpaceID)
+	`, `WITH RECURSIVE series(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM series WHERE i < 2000)
+
+		INSERT INTO space_notifications (notification_id, recipient_space_id, actor_space_id, kind, post_like_id, read_at)
+		SELECT 'large-notification-' || i, $1, 'large-group-' || i, 'post_like', 'large-like-' || i,
+			CASE WHEN i = 1 THEN NULL ELSE CAST(unixepoch('subsec') * 1000000 AS INTEGER) END
+		FROM series
+	`), alice.SpaceID)
 	require.NoError(t, err)
 	page, cursor, err := module.Notifications.List(ctx, alice.SpaceID, "", 1)
 	require.NoError(t, err)
@@ -404,11 +433,14 @@ func TestNotificationReadAfterLatestLikeRemoved(t *testing.T) {
 
 func TestNotificationsMigrationPreservesLikesAndReadState(t *testing.T) {
 	module := newSpaceTestModule(t)
+	if database.IsTurso(module.Spaces.DB) {
+		t.Skip("PostgreSQL historical migration; SQLite starts from current baseline")
+	}
 	ctx := t.Context()
 	alice, bob := notificationTestSpaces(t, module)
-	up, err := os.ReadFile("migrations/150_space_notifications.up.sql")
+	up, err := os.ReadFile("migrations/postgres/150_space_notifications.up.sql")
 	require.NoError(t, err)
-	down, err := os.ReadFile("migrations/150_space_notifications.down.sql")
+	down, err := os.ReadFile("migrations/postgres/150_space_notifications.down.sql")
 	require.NoError(t, err)
 	tx, err := module.Posts.DB.BeginTx(ctx, nil)
 	require.NoError(t, err)

@@ -4,11 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	timeutil "github.com/ente/museum/pkg/utils/time"
 	"strings"
 
 	"github.com/ente/museum/ente/base"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 var (
@@ -72,9 +73,9 @@ func completeFriendRequestNotificationsTx(ctx context.Context, tx *sql.Tx, actor
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE space_notifications
 		SET kind = 'friend_accepted', friend_request_id = NULL,
-		    created_at = now_utc_micro_seconds(), read_at = now_utc_micro_seconds()
+		    created_at = $3, read_at = $3
 		WHERE kind = 'friend_request' AND recipient_space_id = $1 AND actor_space_id = $2
-	`, actorSpaceID, recipientSpaceID); err != nil {
+	`, actorSpaceID, recipientSpaceID, timeutil.Microseconds()); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
 	_, err := tx.ExecContext(ctx, `
@@ -93,12 +94,17 @@ func (r *FriendsRepository) CreateFriendRequest(ctx context.Context, requesterID
 
 	var requesterOwnerID int64
 	var requesterCurrentVersion int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT owner_id, current_version
 		FROM spaces
 		WHERE space_id = $1
 		FOR UPDATE
-	`, requesterSpaceID).Scan(&requesterOwnerID, &requesterCurrentVersion); err != nil {
+	`, `
+		SELECT owner_id, current_version
+		FROM spaces
+		WHERE space_id = $1
+
+	`), requesterSpaceID).Scan(&requesterOwnerID, &requesterCurrentVersion); err != nil {
 		return nil, false, false, stacktrace.Propagate(err, "")
 	}
 	if requesterOwnerID != requesterID || requesterCurrentVersion != requesterKeyVersion {
@@ -107,13 +113,19 @@ func (r *FriendsRepository) CreateFriendRequest(ctx context.Context, requesterID
 
 	var targetOwnerID int64
 	var targetCurrentVersion int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT target_space.owner_id, target_space.current_version
 		FROM spaces target_space
 		JOIN users target_owner ON target_owner.user_id = target_space.owner_id AND target_owner.encrypted_email IS NOT NULL
 		WHERE target_space.space_id = $1
 		FOR UPDATE OF target_space
-	`, targetSpaceID).Scan(&targetOwnerID, &targetCurrentVersion); err != nil {
+	`, `
+		SELECT target_space.owner_id, target_space.current_version
+		FROM spaces target_space
+		JOIN users target_owner ON target_owner.user_id = target_space.owner_id AND target_owner.encrypted_email IS NOT NULL
+		WHERE target_space.space_id = $1
+
+	`), targetSpaceID).Scan(&targetOwnerID, &targetCurrentVersion); err != nil {
 		return nil, false, false, stacktrace.Propagate(err, "")
 	}
 	if targetOwnerID == requesterID {
@@ -129,13 +141,19 @@ func (r *FriendsRepository) CreateFriendRequest(ctx context.Context, requesterID
 	}
 
 	var rec SpaceFriendRequestRecord
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT request_id, created_at
 		FROM space_friend_requests
 		WHERE requester_space_id = $1
 		  AND target_space_id = $2
 		FOR UPDATE
-	`, requesterSpaceID, targetSpaceID).Scan(&rec.RequestID, &rec.CreatedAt)
+	`, `
+		SELECT request_id, created_at
+		FROM space_friend_requests
+		WHERE requester_space_id = $1
+		  AND target_space_id = $2
+
+	`), requesterSpaceID, targetSpaceID).Scan(&rec.RequestID, &rec.CreatedAt)
 	switch {
 	case err == nil:
 		if _, err := tx.ExecContext(ctx, `
@@ -158,13 +176,19 @@ func (r *FriendsRepository) CreateFriendRequest(ctx context.Context, requesterID
 	}
 
 	var reverse SpaceFriendRequestRecord
-	err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT request_id, requester_friend_sealed_space_key, requester_key_version, created_at
 		FROM space_friend_requests
 		WHERE requester_space_id = $1
 		  AND target_space_id = $2
 		FOR UPDATE
-	`, targetSpaceID, requesterSpaceID).Scan(
+	`, `
+		SELECT request_id, requester_friend_sealed_space_key, requester_key_version, created_at
+		FROM space_friend_requests
+		WHERE requester_space_id = $1
+		  AND target_space_id = $2
+
+	`), targetSpaceID, requesterSpaceID).Scan(
 		&reverse.RequestID,
 		&reverse.RequesterFriendSealedSpaceKey,
 		&reverse.RequesterKeyVersion,
@@ -261,7 +285,7 @@ func (r *FriendsRepository) ListFriendRequestsForSpace(ctx context.Context, targ
 	query := `
 		SELECT fr.request_id,
 		       fr.created_at,
-		       ` + spaceActorPublicSelectColumns("requester_space", "requester") + `
+		       ` + spaceActorPublicSelectColumns(r.DB, "requester_space", "requester") + `
 		FROM space_friend_requests fr
 		JOIN spaces requester_space ON requester_space.space_id = fr.requester_space_id
 		JOIN users requester_owner ON requester_owner.user_id = requester_space.owner_id AND requester_owner.encrypted_email IS NOT NULL
@@ -294,7 +318,7 @@ func (r *FriendsRepository) ListSentFriendRequestsForSpace(ctx context.Context, 
 	query := `
 		SELECT fr.request_id,
 		       fr.created_at,
-		       ` + spaceActorPublicSelectColumns("target_space", "target") + `
+		       ` + spaceActorPublicSelectColumns(r.DB, "target_space", "target") + `
 		FROM space_friend_requests fr
 		JOIN spaces target_space ON target_space.space_id = fr.target_space_id
 		JOIN users target_owner ON target_owner.user_id = target_space.owner_id AND target_owner.encrypted_email IS NOT NULL
@@ -336,7 +360,7 @@ func (r *FriendsRepository) ConfirmFriendRequest(ctx context.Context, targetSpac
 	var requesterCurrentVersion int
 	var requesterOwnerID int64
 	var targetCurrentVersion int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT fr.requester_space_id,
 		       fr.requester_friend_sealed_space_key,
 		       fr.requester_key_version,
@@ -350,7 +374,21 @@ func (r *FriendsRepository) ConfirmFriendRequest(ctx context.Context, targetSpac
 		WHERE fr.request_id = $1
 		  AND fr.target_space_id = $2
 		FOR UPDATE OF fr, requester_space, target_space
-	`, requestID, targetSpaceID).Scan(
+	`, `
+		SELECT fr.requester_space_id,
+		       fr.requester_friend_sealed_space_key,
+		       fr.requester_key_version,
+		       requester_space.owner_id,
+		       requester_space.current_version,
+		       target_space.current_version
+		FROM space_friend_requests fr
+		JOIN spaces requester_space ON requester_space.space_id = fr.requester_space_id
+		JOIN users requester_owner ON requester_owner.user_id = requester_space.owner_id AND requester_owner.encrypted_email IS NOT NULL
+		JOIN spaces target_space ON target_space.space_id = fr.target_space_id
+		WHERE fr.request_id = $1
+		  AND fr.target_space_id = $2
+
+	`), requestID, targetSpaceID).Scan(
 		&requesterSpaceID,
 		&requesterFriendSealedSpaceKey,
 		&requesterKeyVersion,
@@ -434,12 +472,17 @@ func (r *FriendsRepository) UpdateShares(ctx context.Context, spaceID string, sh
 	defer tx.Rollback()
 
 	var currentVersion int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT current_version
 		FROM spaces
 		WHERE space_id = $1
 		FOR UPDATE
-	`, spaceID).Scan(&currentVersion); err != nil {
+	`, `
+		SELECT current_version
+		FROM spaces
+		WHERE space_id = $1
+
+	`), spaceID).Scan(&currentVersion); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
 	if currentVersion != keyVersion {
@@ -589,7 +632,7 @@ func (r *FriendsRepository) ListAccessibleSpaceIDs(ctx context.Context, viewerID
 	if viewerID <= 0 || strings.TrimSpace(viewerSpaceID) == "" || len(spaceIDs) == 0 {
 		return out, nil
 	}
-	rows, err := r.DB.QueryContext(ctx, `
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB, `
 		SELECT space_id
 		FROM spaces
 		WHERE owner_id = $1 AND space_id = ANY($2)
@@ -600,7 +643,18 @@ func (r *FriendsRepository) ListAccessibleSpaceIDs(ctx context.Context, viewerID
 		JOIN spaces friend_space ON friend_space.space_id = s.friend_space_id
 		JOIN users u ON u.user_id = w.owner_id AND u.encrypted_email IS NOT NULL
 		WHERE friend_space.owner_id = $1 AND s.friend_space_id = $3 AND s.space_id = ANY($2)
-	`, viewerID, pq.Array(spaceIDs), viewerSpaceID)
+	`, `
+		SELECT space_id
+		FROM spaces
+		WHERE owner_id = $1 AND space_id IN (SELECT value FROM json_each($2))
+		UNION
+		SELECT w.space_id
+		FROM space_friend_shares s
+		JOIN spaces w ON w.space_id = s.space_id
+		JOIN spaces friend_space ON friend_space.space_id = s.friend_space_id
+		JOIN users u ON u.user_id = w.owner_id AND u.encrypted_email IS NOT NULL
+		WHERE friend_space.owner_id = $1 AND s.friend_space_id = $3 AND s.space_id IN (SELECT value FROM json_each($2))
+	`), viewerID, database.Array(r.DB, spaceIDs), viewerSpaceID)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}

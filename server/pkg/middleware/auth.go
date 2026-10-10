@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"net/http"
 	"strconv"
 	"strings"
@@ -61,9 +62,11 @@ func (m *AuthMiddleware) TokenAuthMiddleware(jwtClaimScope *jwt.ClaimScope) gin.
 				userAgent := c.Request.UserAgent()
 				// skip updating last used for requests routed via CF worker
 				if !network.IsCFWorkerIP(ip) {
-					go func() {
-						_ = m.UserAuthRepo.UpdateLastUsedAtByTokenHash(userID, tokenHash[:], ip, userAgent)
-					}()
+					workerjobs.Background(func() {
+						func() {
+							_ = m.UserAuthRepo.UpdateLastUsedAtByTokenHash(userID, tokenHash[:], ip, userAgent)
+						}()
+					})
 				}
 			}
 		} else {

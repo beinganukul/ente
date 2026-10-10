@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 	"github.com/lib/pq"
 )
@@ -20,28 +22,41 @@ const maxSpaceLinkRotationsPerDay = 5
 
 func isSpaceLinkUniqueViolation(err error, constraint string) bool {
 	var pgErr *pq.Error
-	return errors.As(err, &pgErr) &&
-		pgErr.Code == "23505" &&
-		pgErr.Constraint == constraint
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505" && pgErr.Constraint == constraint
+	}
+	// SQLite reports unique columns instead of PostgreSQL constraint names.
+	return constraint == "space_links_auth_key_hash_key" && database.IsUniqueViolation(err) && strings.Contains(err.Error(), "space_links.auth_key_hash")
 }
 
-func deactivateSpaceLinksTx(ctx context.Context, tx *sql.Tx, spaceIDs []string) error {
-	spaceIDArray := pq.Array(spaceIDs)
-	if _, err := tx.ExecContext(ctx, `
+func deactivateSpaceLinksTx(ctx context.Context, db *sql.DB, tx *sql.Tx, spaceIDs []string) error {
+	spaceIDArray := database.Array(db, spaceIDs)
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `
 		UPDATE space_links
 		SET active = FALSE
 		WHERE space_id = ANY($1) AND active = TRUE
-	`, spaceIDArray); err != nil {
+	`, `
+		UPDATE space_links
+		SET active = FALSE
+		WHERE space_id IN (SELECT value FROM json_each($1)) AND active = TRUE
+	`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to deactivate space links")
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `
 		DELETE FROM space_web_push_subscriptions
 		WHERE link_id IN (
 			SELECT link_id
 			FROM space_links
 			WHERE space_id = ANY($1) AND active = FALSE
 		)
-	`, spaceIDArray); err != nil {
+	`, `
+		DELETE FROM space_web_push_subscriptions
+		WHERE link_id IN (
+			SELECT link_id
+			FROM space_links
+			WHERE space_id IN (SELECT value FROM json_each($1)) AND active = FALSE
+		)
+	`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to delete inactive link subscriptions")
 	}
 	return nil
@@ -143,12 +158,17 @@ func (r *LinksRepository) Create(
 	defer tx.Rollback()
 
 	var currentVersion int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT current_version
 		FROM spaces
 		WHERE space_id = $1
 		FOR UPDATE
-	`, spaceID).Scan(&currentVersion); err != nil {
+	`, `
+		SELECT current_version
+		FROM spaces
+		WHERE space_id = $1
+
+	`), spaceID).Scan(&currentVersion); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
 	if currentVersion != keyVersion {
@@ -203,12 +223,17 @@ func (r *LinksRepository) Rotate(
 	}
 	defer tx.Rollback()
 	var currentVersion int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT current_version
 		FROM spaces
 		WHERE space_id = $1
 		FOR UPDATE
-	`, spaceID).Scan(&currentVersion); err != nil {
+	`, `
+		SELECT current_version
+		FROM spaces
+		WHERE space_id = $1
+
+	`), spaceID).Scan(&currentVersion); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
 	if currentVersion != keyVersion {
@@ -216,19 +241,25 @@ func (r *LinksRepository) Rotate(
 	}
 	// Link deactivation updates updated_at, recording when each rotation succeeded.
 	var recentRotations int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT COUNT(*)
 		FROM space_links
 		WHERE space_id = $1
 		  AND active = FALSE
 		  AND updated_at >= now_utc_micro_seconds() - $2
-	`, spaceID, (24 * time.Hour).Microseconds()).Scan(&recentRotations); err != nil {
+	`, `
+		SELECT COUNT(*)
+		FROM space_links
+		WHERE space_id = $1
+		  AND active = FALSE
+		  AND updated_at >= CAST(unixepoch('subsec') * 1000000 AS INTEGER) - $2
+	`), spaceID, (24 * time.Hour).Microseconds()).Scan(&recentRotations); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
 	if recentRotations >= maxSpaceLinkRotationsPerDay {
 		return nil, ErrSpaceLinkRotationLimitReached
 	}
-	if err := deactivateSpaceLinksTx(ctx, tx, []string{spaceID}); err != nil {
+	if err := deactivateSpaceLinksTx(ctx, r.DB, tx, []string{spaceID}); err != nil {
 		return nil, err
 	}
 	var linkID int64

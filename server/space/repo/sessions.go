@@ -5,11 +5,38 @@ import (
 	"database/sql"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	timeutil "github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
 )
 
 func (r *SessionsRepository) ExchangeBrowserSession(ctx context.Context, authTokenHash []byte, tokenHash []byte, userID int64, sessionWrapKey string, expiresAt int64) error {
+	if database.IsTurso(r.DB) {
+		// Consume the authentication token and create the session in one writer transaction.
+		tx, err := r.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return stacktrace.Propagate(err, "")
+		}
+		defer tx.Rollback()
+		result, err := tx.ExecContext(ctx, `UPDATE tokens SET is_deleted = TRUE
+   WHERE user_id = $1 AND token_hash = $2 AND is_deleted = FALSE
+   AND (last_used_at IS NULL OR last_used_at >= $3)`, userID, authTokenHash, timeutil.Microseconds()-(365*24*60*60*1000*1000))
+		if err != nil {
+			return stacktrace.Propagate(err, "")
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return stacktrace.Propagate(err, "")
+		}
+		if count == 0 {
+			return ente.ErrAuthenticationRequired
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO space_browser_sessions (token_hash, user_id, session_wrap_key, expires_at) VALUES ($1, $2, $3, $4)`, tokenHash, userID, sessionWrapKey, expiresAt); err != nil {
+			return stacktrace.Propagate(err, "")
+		}
+		return stacktrace.Propagate(tx.Commit(), "")
+	}
+
 	result, err := r.DB.ExecContext(ctx, `
 		WITH consumed_token AS (
 			UPDATE tokens
@@ -83,14 +110,21 @@ func (r *SessionsRepository) DeleteBrowserSession(ctx context.Context, tokenHash
 }
 
 func (r *SessionsRepository) DeleteBrowserSessionsForToken(ctx context.Context, tokenHash []byte) error {
-	result, err := r.DB.ExecContext(ctx, `
+	result, err := r.DB.ExecContext(ctx, database.SQL(r.DB, `
 		DELETE FROM space_browser_sessions
 		WHERE user_id = (
 			SELECT user_id
 			FROM space_browser_sessions
 			WHERE token_hash = $1 AND expires_at > now_utc_micro_seconds()
 		)
-	`, tokenHash)
+	`, `
+		DELETE FROM space_browser_sessions
+		WHERE user_id = (
+			SELECT user_id
+			FROM space_browser_sessions
+			WHERE token_hash = $1 AND expires_at > CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+		)
+	`), tokenHash)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}

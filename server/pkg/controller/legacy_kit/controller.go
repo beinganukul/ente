@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"strings"
 
 	"github.com/ente/museum/pkg/controller/user"
@@ -213,7 +214,7 @@ func (c *Controller) OpenRecovery(ctx *gin.Context, req ente.LegacyKitOpenRecove
 		return nil, err
 	}
 	if createdSession {
-		go c.sendRecoveryStartedNotification(context.Background(), kit.UserID, session, req.Email)
+		workerjobs.Background(func() { c.sendRecoveryStartedNotification(context.Background(), kit.UserID, session, req.Email) })
 	}
 	return &ente.LegacyKitOpenRecoveryResponse{
 		Session:      toRecoverySession(session),
@@ -295,7 +296,7 @@ func (c *Controller) ChangePassword(ctx *gin.Context, req ente.LegacyKitRecovery
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to update password via legacy kit")
 	}
-	go c.sendRecoveryCompletedNotification(context.Background(), session.UserID)
+	workerjobs.Background(func() { c.sendRecoveryCompletedNotification(context.Background(), session.UserID) })
 	return resp, nil
 }
 

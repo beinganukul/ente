@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 	"strings"
 )
@@ -47,10 +48,10 @@ func (r *Repository) AddCoupons(ctx context.Context, providerName string, codes 
 }
 
 func (r *Repository) GetUnclaimedCoupon(ctx context.Context, providerName string) (*DiscountCoupon, error) {
-	query := `SELECT provider_name, code, claimed_by_user_id, claimed_at, sent_count, created_at, updated_at 
-	          FROM discount_coupons 
-	          WHERE provider_name = $1 AND claimed_by_user_id IS NULL 
-	          ORDER BY created_at ASC 
+	query := `SELECT provider_name, code, claimed_by_user_id, claimed_at, sent_count, created_at, updated_at
+	          FROM discount_coupons
+	          WHERE provider_name = $1 AND claimed_by_user_id IS NULL
+	          ORDER BY created_at ASC
 	          LIMIT 1`
 
 	var coupon DiscountCoupon
@@ -67,9 +68,12 @@ func (r *Repository) GetUnclaimedCoupon(ctx context.Context, providerName string
 }
 
 func (r *Repository) ClaimCoupon(ctx context.Context, providerName, code string, userID int64) error {
-	query := `UPDATE discount_coupons 
+	query := database.SQL(r.DB,
+		`UPDATE discount_coupons
 	          SET claimed_by_user_id = $1, claimed_at = now_utc_micro_seconds(), sent_count = 1
-	          WHERE provider_name = $2 AND code = $3 AND claimed_by_user_id IS NULL`
+	          WHERE provider_name = $2 AND code = $3 AND claimed_by_user_id IS NULL`, `UPDATE discount_coupons
+	          SET claimed_by_user_id = $1, claimed_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER), sent_count = 1
+	          WHERE provider_name = $2 AND code = $3 AND claimed_by_user_id IS NULL`)
 
 	result, err := r.DB.ExecContext(ctx, query, userID, providerName, code)
 	if err != nil {
@@ -89,8 +93,8 @@ func (r *Repository) ClaimCoupon(ctx context.Context, providerName, code string,
 }
 
 func (r *Repository) GetClaimedCoupon(ctx context.Context, providerName string, userID int64) (*DiscountCoupon, error) {
-	query := `SELECT provider_name, code, claimed_by_user_id, claimed_at, sent_count, created_at, updated_at 
-	          FROM discount_coupons 
+	query := `SELECT provider_name, code, claimed_by_user_id, claimed_at, sent_count, created_at, updated_at
+	          FROM discount_coupons
 	          WHERE provider_name = $1 AND claimed_by_user_id = $2`
 
 	var coupon DiscountCoupon
@@ -107,8 +111,8 @@ func (r *Repository) GetClaimedCoupon(ctx context.Context, providerName string, 
 }
 
 func (r *Repository) IncrementSentCount(ctx context.Context, providerName, code string) error {
-	query := `UPDATE discount_coupons 
-	          SET sent_count = sent_count + 1 
+	query := `UPDATE discount_coupons
+	          SET sent_count = sent_count + 1
 	          WHERE provider_name = $1 AND code = $2`
 
 	_, err := r.DB.ExecContext(ctx, query, providerName, code)

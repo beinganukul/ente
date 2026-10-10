@@ -2,6 +2,7 @@ package repo
 
 import (
 	"database/sql"
+	"github.com/ente/museum/pkg/utils/database"
 	"testing"
 	"time"
 
@@ -105,13 +106,11 @@ func TestTrashFilesRollsBackWhenFileLinkCleanupFails(t *testing.T) {
 	linkObjectTestFileToCollection(t, db, collectionID, fileID, ownerID)
 	insertTrashTestFileLink(t, db, "pft_failure", "failure-token", fileID, ownerID)
 
-	if _, err := db.Exec(`ALTER TABLE public_file_tokens
-		ADD CONSTRAINT test_public_file_tokens_disable_failure CHECK (is_disabled = FALSE)`); err != nil {
+	if _, err := db.Exec(database.SQL(db, `ALTER TABLE public_file_tokens ADD CONSTRAINT test_public_file_tokens_disable_failure CHECK (is_disabled = FALSE)`, `CREATE TRIGGER test_public_file_tokens_disable_failure BEFORE UPDATE ON public_file_tokens WHEN NEW.is_disabled BEGIN SELECT RAISE(ABORT,'disable failure'); END`)); err != nil {
 		t.Fatalf("failed to install public file link failure constraint: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := db.Exec(`ALTER TABLE public_file_tokens
-			DROP CONSTRAINT IF EXISTS test_public_file_tokens_disable_failure`); err != nil {
+		if _, err := db.Exec(database.SQL(db, `ALTER TABLE public_file_tokens DROP CONSTRAINT IF EXISTS test_public_file_tokens_disable_failure`, `DROP TRIGGER IF EXISTS test_public_file_tokens_disable_failure`)); err != nil {
 			t.Errorf("failed to remove public file link failure constraint: %v", err)
 		}
 	})
@@ -253,11 +252,11 @@ func setupTrashTest(t *testing.T) (*TrashRepository, *sql.DB) {
 	t.Helper()
 
 	_, db := setupAccessibleObjectTest(t)
-	if _, err := db.Exec(`TRUNCATE TABLE public_file_tokens_access_history, public_file_tokens RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := db.Exec(database.SQL(db, `TRUNCATE TABLE public_file_tokens_access_history, public_file_tokens RESTART IDENTITY CASCADE`, `DELETE FROM public_file_tokens_access_history; DELETE FROM public_file_tokens`)); err != nil {
 		t.Fatalf("failed to reset public file link tables: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := db.Exec(`TRUNCATE TABLE public_file_tokens_access_history, public_file_tokens RESTART IDENTITY CASCADE`); err != nil {
+		if _, err := db.Exec(database.SQL(db, `TRUNCATE TABLE public_file_tokens_access_history, public_file_tokens RESTART IDENTITY CASCADE`, `DELETE FROM public_file_tokens_access_history; DELETE FROM public_file_tokens`)); err != nil {
 			t.Errorf("failed to reset public file link tables: %v", err)
 		}
 	})

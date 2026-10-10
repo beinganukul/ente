@@ -5,12 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	timeutil "github.com/ente/museum/pkg/utils/time"
 	"strconv"
 	"strings"
 
 	"github.com/ente/museum/ente/base"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 const MaxActiveMessagesSentPerSpace = 5000
@@ -35,13 +36,30 @@ const spaceMessageBaseSelectColumns = `
 	'' AS text
 `
 
-func spaceMessageSelectColumns(viewerPlaceholder string) string {
-	encryptedMessageKeySQL := `
-		CASE
-			WHEN m.sender_space_id = ` + viewerPlaceholder + ` THEN COALESCE(m.sender_encrypted_message_key, '\x'::bytea)
-			ELSE COALESCE(m.recipient_encrypted_message_key, '\x'::bytea)
-		END`
-	return strings.TrimSpace(fmt.Sprintf(spaceMessageBaseSelectColumns, viewerPlaceholder, encryptedMessageKeySQL))
+const spaceMessageBaseSelectColumnsSQLite = `
+	m.message_id,
+	m.kind,
+	m.sender_space_id,
+	m.recipient_space_id,
+	COALESCE(m.message_cipher, X''),
+	%[2]s AS encrypted_message_key,
+	CASE WHEN m.sender_space_id = %[1]s THEN m.sender_encrypted_reaction ELSE m.recipient_encrypted_reaction END AS encrypted_reaction,
+	m.reply_post_id,
+	m.reply_message_id,
+	(m.recipient_liked_at IS NOT NULL) AS liked,
+	(m.recipient_liked_at IS NOT NULL AND m.recipient_space_id = %[1]s) AS viewer_liked,
+	m.is_deleted,
+	m.created_at,
+	m.updated_at,
+	'' AS text
+`
+
+func spaceMessageSelectColumns(db *sql.DB, viewerPlaceholder string) string {
+	emptyBytes := database.SQL(db, "'\\x'::bytea", "X''")
+	encryptedMessageKeySQL := `CASE WHEN m.sender_space_id = ` + viewerPlaceholder +
+		` THEN COALESCE(m.sender_encrypted_message_key, ` + emptyBytes + `)
+   ELSE COALESCE(m.recipient_encrypted_message_key, ` + emptyBytes + `) END`
+	return strings.TrimSpace(fmt.Sprintf(database.SQL(db, spaceMessageBaseSelectColumns, spaceMessageBaseSelectColumnsSQLite), viewerPlaceholder, encryptedMessageKeySQL))
 }
 
 const selectedThreadKeySQL = `CASE WHEN $1 < $2 THEN $1 || ':' || $2 ELSE $2 || ':' || $1 END`
@@ -51,6 +69,13 @@ WITH conversation_peers AS (
 	SELECT DISTINCT input_friend.friend_space_id
 	FROM unnest($2::text[]) AS input_friend(friend_space_id)
 	WHERE input_friend.friend_space_id <> ''
+)`
+
+const inputConversationPeersSQLSQLite = `
+WITH conversation_peers AS (
+	SELECT DISTINCT value AS friend_space_id
+	FROM json_each($2)
+	WHERE value <> ''
 )`
 
 const currentFriendConversationPeersSQL = `
@@ -156,10 +181,108 @@ FROM (
 	  AND m.recipient_liked_at IS NOT NULL
 ) activity`
 
-const chatSummaryActivityRowsSQL = inputConversationPeersSQL + conversationActivityRowsSQL + `
-ORDER BY friend_space_id, activity_created_at DESC, activity_id DESC`
+const conversationActivityRowsSQLSQLite = `,
+peer_messages AS (
+	SELECT m.*
+	FROM space_messages m
+	JOIN conversation_peers cp
+	  ON (
+	      (m.sender_space_id = $1 AND m.recipient_space_id = cp.friend_space_id)
+	      OR (m.recipient_space_id = $1 AND m.sender_space_id = cp.friend_space_id)
+	  )
+	WHERE m.is_deleted = FALSE
+)
+SELECT
+	friend_space_id,
+	activity_type,
+	activity_id,
+	activity_created_at,
+	is_outgoing,
+	message_id,
+	post_id,
+	post_space_id,
+	message_kind,
+	sender_space_id,
+	recipient_space_id,
+	message_cipher,
+	encrypted_message_key,
+	encrypted_reaction,
+	reply_message_id,
+	notification_created_at
+FROM (
+	SELECT
+		CASE
+			WHEN m.sender_space_id = $1 THEN m.recipient_space_id
+			ELSE m.sender_space_id
+		END AS friend_space_id,
+		CASE
+			WHEN m.kind = 'post_reply' AND m.recipient_space_id = $1 THEN 'post_reply'
+			ELSE 'message'
+		END AS activity_type,
+		CASE
+			WHEN m.kind = 'post_reply' AND m.recipient_space_id = $1 THEN 'post_reply:' || m.message_id
+			ELSE 'message:' || m.message_id
+		END AS activity_id,
+		m.created_at AS activity_created_at,
+		m.message_id,
+		m.reply_post_id AS post_id,
+		m.recipient_space_id AS post_space_id,
+		m.kind AS message_kind,
+		m.sender_space_id,
+		m.recipient_space_id,
+		m.message_cipher,
+		CASE
+			WHEN m.sender_space_id = $1 THEN m.sender_encrypted_message_key
+			ELSE m.recipient_encrypted_message_key
+		END AS encrypted_message_key,
+		NULL AS encrypted_reaction,
+		m.reply_message_id,
+		CASE
+			WHEN m.recipient_space_id = $1 AND m.kind IN ('regular', 'post_reply') THEN m.created_at
+			ELSE NULL
+		END AS notification_created_at,
+		(m.sender_space_id = $1) AS is_outgoing
+	FROM peer_messages m
+	WHERE m.kind IN ('regular', 'post_reply')
 
-const currentFriendActivityRowsSQL = currentFriendConversationPeersSQL + conversationActivityRowsSQL
+	UNION ALL
+
+	SELECT
+		CASE
+			WHEN m.sender_space_id = $1 THEN m.recipient_space_id
+			ELSE m.sender_space_id
+		END AS friend_space_id,
+		'message_like' AS activity_type,
+		'message_like:' || m.message_id || ':' || m.recipient_space_id AS activity_id,
+		m.recipient_liked_at AS activity_created_at,
+		m.message_id,
+		NULL AS post_id,
+		NULL AS post_space_id,
+		m.kind AS message_kind,
+		m.sender_space_id,
+		m.recipient_space_id,
+		m.message_cipher,
+		CASE
+			WHEN m.sender_space_id = $1 THEN m.sender_encrypted_message_key
+			ELSE m.recipient_encrypted_message_key
+		END AS encrypted_message_key,
+		CASE WHEN m.sender_space_id = $1 THEN m.sender_encrypted_reaction ELSE m.recipient_encrypted_reaction END AS encrypted_reaction,
+		m.reply_message_id,
+		CASE WHEN m.sender_space_id = $1 THEN m.recipient_liked_at ELSE NULL END AS notification_created_at,
+		(m.recipient_space_id = $1) AS is_outgoing
+	FROM peer_messages m
+	WHERE m.kind IN ('regular', 'post_reply')
+	  AND m.recipient_liked_at IS NOT NULL
+) activity`
+
+func chatSummarySQL(db *sql.DB) string {
+	return database.SQL(db, inputConversationPeersSQL, inputConversationPeersSQLSQLite) + database.SQL(db, conversationActivityRowsSQL, conversationActivityRowsSQLSQLite) + `
+ORDER BY friend_space_id, activity_created_at DESC, activity_id DESC`
+}
+
+func currentFriendSQL(db *sql.DB) string {
+	return currentFriendConversationPeersSQL + database.SQL(db, conversationActivityRowsSQL, conversationActivityRowsSQLSQLite)
+}
 
 func (r *MessagesRepository) CreateMessage(ctx context.Context, input CreateSpaceMessageRecord) (*SpaceMessageRecord, error) {
 	messageID := strings.TrimSpace(input.MessageID)
@@ -180,12 +303,17 @@ func (r *MessagesRepository) CreateMessage(ctx context.Context, input CreateSpac
 	}
 	defer tx.Rollback()
 	var senderSpaceID string
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT space_id
 		FROM spaces
 		WHERE space_id = $1
 		FOR UPDATE
-	`, input.SenderSpaceID).Scan(&senderSpaceID); err != nil {
+	`, `
+		SELECT space_id
+		FROM spaces
+		WHERE space_id = $1
+
+	`), input.SenderSpaceID).Scan(&senderSpaceID); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
 	var activeMessageCount int
@@ -239,7 +367,7 @@ func (r *MessagesRepository) CreateMessage(ctx context.Context, input CreateSpac
 
 func (r *MessagesRepository) GetMessage(ctx context.Context, messageID string, viewerSpaceID string) (*SpaceMessageRecord, error) {
 	query := `
-		SELECT ` + spaceMessageSelectColumns("$2") + `
+		SELECT ` + spaceMessageSelectColumns(r.DB, "$2") + `
 		FROM space_messages m
 		WHERE m.message_id = $1
 		  AND (m.sender_space_id = $2 OR m.recipient_space_id = $2)
@@ -254,7 +382,7 @@ func (r *MessagesRepository) ListThread(ctx context.Context, viewerSpaceID strin
 	}
 	args := []any{viewerSpaceID, otherSpaceID}
 	query := `
-		SELECT ` + spaceMessageSelectColumns("$1") + `
+		SELECT ` + spaceMessageSelectColumns(r.DB, "$1") + `
 		FROM space_messages m
 		WHERE m.thread_key = ` + selectedThreadKeySQL + `
 		  AND m.is_deleted = FALSE`
@@ -295,7 +423,7 @@ func (r *MessagesRepository) SetLike(ctx context.Context, messageID string, acto
 
 func (r *MessagesRepository) SetLikeWithChanged(ctx context.Context, messageID string, actorSpaceID string, like bool) (bool, error) {
 	if like {
-		result, err := r.DB.ExecContext(ctx, `
+		result, err := r.DB.ExecContext(ctx, database.SQL(r.DB, `
 			UPDATE space_messages
 			SET recipient_liked_at = now_utc_micro_seconds()
 			WHERE message_id = $1
@@ -303,7 +431,15 @@ func (r *MessagesRepository) SetLikeWithChanged(ctx context.Context, messageID s
 			  AND kind IN ('regular', 'post_reply')
 			  AND is_deleted = FALSE
 			  AND recipient_liked_at IS NULL
-		`, messageID, actorSpaceID)
+		`, `
+			UPDATE space_messages
+			SET recipient_liked_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+			WHERE message_id = $1
+			  AND recipient_space_id = $2
+			  AND kind IN ('regular', 'post_reply')
+			  AND is_deleted = FALSE
+			  AND recipient_liked_at IS NULL
+		`), messageID, actorSpaceID)
 		if err != nil {
 			return false, stacktrace.Propagate(err, "")
 		}
@@ -328,6 +464,28 @@ func (r *MessagesRepository) SetLikeWithChanged(ctx context.Context, messageID s
 }
 
 func (r *MessagesRepository) SetReaction(ctx context.Context, messageID, actorSpaceID string, senderCipher, recipientCipher []byte) (bool, error) {
+	if database.IsTurso(r.DB) {
+		tx, err := r.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return false, stacktrace.Propagate(err, "")
+		}
+		defer tx.Rollback()
+		var likedAt sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT recipient_liked_at FROM space_messages
+   WHERE message_id = $1 AND recipient_space_id = $2 AND kind IN ('regular', 'post_reply') AND is_deleted = FALSE`, messageID, actorSpaceID).Scan(&likedAt); err != nil {
+			return false, stacktrace.Propagate(err, "")
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE space_messages SET sender_encrypted_reaction = $3,
+   recipient_encrypted_reaction = $4, recipient_liked_at = COALESCE(recipient_liked_at, $5)
+   WHERE message_id = $1 AND recipient_space_id = $2`, messageID, actorSpaceID, senderCipher, recipientCipher, timeutil.Microseconds()); err != nil {
+			return false, stacktrace.Propagate(err, "")
+		}
+		if err := tx.Commit(); err != nil {
+			return false, stacktrace.Propagate(err, "")
+		}
+		return !likedAt.Valid, nil
+	}
+
 	var added bool
 	err := r.DB.QueryRowContext(ctx, `
 		WITH target AS (
@@ -386,7 +544,7 @@ func (r *MessagesRepository) ListLatestChatSummaries(ctx context.Context, viewer
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.DB.QueryContext(ctx, chatSummaryActivityRowsSQL, strings.TrimSpace(viewerSpaceID), pq.Array(cleanFriendSpaceIDs))
+	rows, err := r.DB.QueryContext(ctx, chatSummarySQL(r.DB), strings.TrimSpace(viewerSpaceID), database.Array(r.DB, cleanFriendSpaceIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -421,12 +579,17 @@ func (r *MessagesRepository) ListLatestChatSummaries(ctx context.Context, viewer
 
 func (r *MessagesRepository) listNotificationReadMarkers(ctx context.Context, viewerSpaceID string, friendSpaceIDs []string) (map[string]int64, error) {
 	out := make(map[string]int64, len(friendSpaceIDs))
-	rows, err := r.DB.QueryContext(ctx, `
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB, `
 		SELECT friend_space_id, read_at
 		FROM space_notification_read_markers
 		WHERE viewer_space_id = $1
 		  AND friend_space_id = ANY($2)
-	`, strings.TrimSpace(viewerSpaceID), pq.Array(friendSpaceIDs))
+	`, `
+		SELECT friend_space_id, read_at
+		FROM space_notification_read_markers
+		WHERE viewer_space_id = $1
+		  AND friend_space_id IN (SELECT value FROM json_each($2))
+	`), strings.TrimSpace(viewerSpaceID), database.Array(r.DB, friendSpaceIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}

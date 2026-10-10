@@ -9,8 +9,8 @@ import (
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/ente/base"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type CollectionActionsRepository struct {
@@ -184,7 +184,9 @@ func (r *CollectionActionsRepository) resetPendingForActions(ctx context.Context
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err := r.DB.ExecContext(ctx, `UPDATE collection_actions SET is_pending = false WHERE id = ANY($1)`, pq.Array(ids))
+	_, err := r.DB.ExecContext(ctx, database.SQL(r.DB,
+		`UPDATE collection_actions SET is_pending = false WHERE id = ANY($1)`, `UPDATE collection_actions SET is_pending = false WHERE id IN (SELECT value FROM json_each($1))`), database.Array(r.DB,
+		ids))
 	return stacktrace.Propagate(err, "")
 }
 
@@ -192,12 +194,19 @@ func (r *CollectionActionsRepository) RejectDeleteSuggestions(ctx context.Contex
 	if len(fileIDs) == 0 {
 		return 0, nil
 	}
-	res, err := r.DB.ExecContext(ctx, `UPDATE collection_actions
+	res, err := r.DB.ExecContext(ctx, database.SQL(r.DB,
+		`UPDATE collection_actions
 	        SET is_pending = false
 	    WHERE user_id = $1
 	        AND action = $2
 	        AND is_pending = true
-	        AND file_id = ANY($3)`, userID, ente.ActionDeleteSuggested, pq.Array(fileIDs))
+	        AND file_id = ANY($3)`, `UPDATE collection_actions
+	        SET is_pending = false
+	    WHERE user_id = $1
+	        AND action = $2
+	        AND is_pending = true
+	        AND file_id IN (SELECT value FROM json_each($3))`), userID, ente.ActionDeleteSuggested, database.Array(r.DB,
+		fileIDs))
 	if err != nil {
 		return 0, stacktrace.Propagate(err, "")
 	}

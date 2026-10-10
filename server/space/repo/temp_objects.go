@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	timeutil "github.com/ente/museum/pkg/utils/time"
 	"time"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -42,20 +44,29 @@ func (r *AssetsRepository) ReserveTempObject(ctx context.Context, rec SpaceTempO
 		return stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT space_id
 		FROM spaces
 		WHERE space_id = $1
 		FOR UPDATE
-	`, rec.SpaceID.String).Scan(&rec.SpaceID.String); err != nil {
+	`, `
+		SELECT space_id
+		FROM spaces
+		WHERE space_id = $1
+
+	`), rec.SpaceID.String).Scan(&rec.SpaceID.String); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
 	var activeCount int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT COUNT(*)
 		FROM space_temp_objects
 		WHERE space_id = $1 AND expires_at > now_utc_micro_seconds()
-	`, rec.SpaceID.String).Scan(&activeCount); err != nil {
+	`, `
+		SELECT COUNT(*)
+		FROM space_temp_objects
+		WHERE space_id = $1 AND expires_at > CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+	`), rec.SpaceID.String).Scan(&activeCount); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
 	if activeCount >= MaxActiveUploadCount {
@@ -79,9 +90,10 @@ func QueueObjectCleanupTx(ctx context.Context, tx *sql.Tx, rec SpaceTempObjectRe
 	if expectedSize <= 0 {
 		expectedSize = 1
 	}
+	now := timeutil.Microseconds()
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO space_temp_objects (object_key, space_id, purpose, bucket_id, expected_size, expires_at, cleanup_after)
-		VALUES ($1, $2, $3, $4, $5, now_utc_micro_seconds(), now_utc_micro_seconds() + $6)
+		VALUES ($1, $2, $3, $4, $5, $7, $6)
 		ON CONFLICT (object_key) DO UPDATE
 		SET space_id = EXCLUDED.space_id,
 		    purpose = EXCLUDED.purpose,
@@ -89,16 +101,19 @@ func QueueObjectCleanupTx(ctx context.Context, tx *sql.Tx, rec SpaceTempObjectRe
 		    expected_size = EXCLUDED.expected_size,
 		    expires_at = EXCLUDED.expires_at,
 		    cleanup_after = EXCLUDED.cleanup_after
-	`, rec.ObjectKey, rec.SpaceID, rec.Purpose, rec.BucketID, expectedSize, SpaceUploadCleanupDelay.Microseconds())
+	`, rec.ObjectKey, rec.SpaceID, rec.Purpose, rec.BucketID, expectedSize, now+SpaceUploadCleanupDelay.Microseconds(), now)
 	return stacktrace.Propagate(err, "")
 }
 
 func (r *AssetsRepository) GetTempObject(ctx context.Context, objectKey, purpose string, spaceID *string) (*SpaceTempObjectRecord, error) {
 	args := []any{objectKey, purpose}
-	query := `
+	query := database.SQL(r.DB, `
 		SELECT object_key, space_id, purpose, bucket_id, expected_size, expires_at, cleanup_after, created_at, content_md5, client
 		FROM space_temp_objects
-		WHERE object_key = $1 AND purpose = $2 AND expires_at > now_utc_micro_seconds()`
+		WHERE object_key = $1 AND purpose = $2 AND expires_at > now_utc_micro_seconds()`, `
+		SELECT object_key, space_id, purpose, bucket_id, expected_size, expires_at, cleanup_after, created_at, content_md5, client
+		FROM space_temp_objects
+		WHERE object_key = $1 AND purpose = $2 AND expires_at > CAST(unixepoch('subsec') * 1000000 AS INTEGER)`)
 	if spaceID != nil {
 		args = append(args, *spaceID)
 		query += fmt.Sprintf(" AND space_id = $%d", len(args))
@@ -139,14 +154,21 @@ func (r *AssetsRepository) GetAndLockExpiredTempObjects(ctx context.Context, now
 			_ = tx.Rollback()
 		}
 	}()
-	rows, err := tx.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, database.SQL(r.DB, `
 		SELECT object_key, space_id, purpose, bucket_id, expected_size, expires_at, cleanup_after, created_at, content_md5, client
 		FROM space_temp_objects
 		WHERE cleanup_after <= $1
 		ORDER BY cleanup_after ASC
 		LIMIT $2
 		FOR UPDATE SKIP LOCKED
-	`, nowMicros, limit)
+	`, `
+		SELECT object_key, space_id, purpose, bucket_id, expected_size, expires_at, cleanup_after, created_at, content_md5, client
+		FROM space_temp_objects
+		WHERE cleanup_after <= $1
+		ORDER BY cleanup_after ASC
+		LIMIT $2
+
+	`), nowMicros, limit)
 	if err != nil {
 		return nil, nil, stacktrace.Propagate(err, "")
 	}

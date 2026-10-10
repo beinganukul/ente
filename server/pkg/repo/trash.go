@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ente/museum/pkg/repo/public"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"strings"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 )
 
@@ -73,11 +74,11 @@ func (t *TrashRepository) InsertItems(ctx context.Context, tx *sql.Tx, userID in
 
 func (t *TrashRepository) GetDiff(userID int64, sinceTime int64, limit int, app ente.App) ([]ente.Trash, error) {
 	rows, err := t.DB.Query(`
-	SELECT t.file_id, t.user_id, t.collection_id, cf.encrypted_key, cf.key_decryption_nonce, 
-		f.file_decryption_header, f.thumbnail_decryption_header, f.metadata_decryption_header, 
+	SELECT t.file_id, t.user_id, t.collection_id, cf.encrypted_key, cf.key_decryption_nonce,
+		f.file_decryption_header, f.thumbnail_decryption_header, f.metadata_decryption_header,
 		f.encrypted_metadata, f.magic_metadata,f.pub_magic_metadata, f.updation_time, f.info,
 		t.is_deleted, t.is_restored, t.created_at, t.updated_at, t.delete_by
-	FROM trash t 
+	FROM trash t
 	JOIN collection_files cf ON t.file_id = cf.file_id AND t.collection_id = cf.collection_id
 	JOIN files f ON f.file_id = t.file_id
 			AND t.user_id = $1
@@ -85,7 +86,7 @@ func (t *TrashRepository) GetDiff(userID int64, sinceTime int64, limit int, app 
 			AND t.updated_at > $2
 	JOIN collections c ON c.collection_id = t.collection_id
 	WHERE c.app = $4
-	ORDER BY t.updated_at 
+	ORDER BY t.updated_at
 	LIMIT $3
 `,
 		userID, sinceTime, limit, app)
@@ -125,10 +126,10 @@ func (t *TrashRepository) TrashFiles(ctx context.Context, userID int64, trash en
 		return stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	if err := lockFiles(ctx, tx, userID, fileIDs); err != nil {
+	if err := lockFiles(ctx, t.DB, tx, userID, fileIDs); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	photosFileDelta, lockerFileDelta, ambiguousFileApp, err := activeOwnedFileCountDeltas(ctx, tx, userID, fileIDs)
+	photosFileDelta, lockerFileDelta, ambiguousFileApp, err := activeOwnedFileCountDeltas(ctx, t.DB, tx, userID, fileIDs)
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to calculate file count transition")
 	}
@@ -139,8 +140,11 @@ func (t *TrashRepository) TrashFiles(ctx context.Context, userID int64, trash en
 		}).Error("found cross-app or invalid app memberships while trashing files")
 	}
 	updationTime := time.Microseconds()
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT collection_id FROM 
-			collection_files WHERE file_id = ANY($1) AND is_deleted = $2`, pq.Array(fileIDs), false)
+	rows, err := tx.QueryContext(ctx, database.SQL(t.DB,
+		`SELECT DISTINCT collection_id FROM
+			collection_files WHERE file_id = ANY($1) AND is_deleted = $2`, `SELECT DISTINCT collection_id FROM
+			collection_files WHERE file_id IN (SELECT value FROM json_each($1)) AND is_deleted = $2`), database.Array(t.DB,
+		fileIDs), false)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -153,14 +157,19 @@ func (t *TrashRepository) TrashFiles(ctx context.Context, userID int64, trash en
 		}
 		cIDs = append(cIDs, cID)
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE collection_files 
-			SET is_deleted = $1, updation_time = $2 WHERE file_id = ANY($3)`,
-		true, updationTime, pq.Array(fileIDs))
+	_, err = tx.ExecContext(ctx, database.SQL(t.DB,
+		`UPDATE collection_files
+			SET is_deleted = $1, updation_time = $2 WHERE file_id = ANY($3)`, `UPDATE collection_files
+			SET is_deleted = $1, updation_time = $2 WHERE file_id IN (SELECT value FROM json_each($3))`), true, updationTime, database.Array(t.DB,
+		fileIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE collections SET updation_time = $1
-			WHERE collection_id = ANY ($2)`, updationTime, pq.Array(cIDs))
+	_, err = tx.ExecContext(ctx, database.SQL(t.DB,
+		`UPDATE collections SET updation_time = $1
+			WHERE collection_id = ANY ($2)`, `UPDATE collections SET updation_time = $1
+			WHERE collection_id IN (SELECT value FROM json_each($2))`), updationTime, database.Array(t.DB,
+		cIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -173,11 +182,13 @@ func (t *TrashRepository) TrashFiles(ctx context.Context, userID int64, trash en
 		return stacktrace.Propagate(err, "failed to disable file links for files being trashed")
 	}
 	if photosFileDelta != 0 || lockerFileDelta != 0 || ambiguousFileApp {
-		if _, err := applyUsageChange(ctx, tx, userID, usageChange{
-			PhotosFileDelta:      photosFileDelta,
-			LockerFileDelta:      lockerFileDelta,
-			InvalidateFileCounts: ambiguousFileApp,
-		}); err != nil {
+		if _, err := applyUsageChange(ctx, t.DB,
+
+			tx, userID, usageChange{
+				PhotosFileDelta:      photosFileDelta,
+				LockerFileDelta:      lockerFileDelta,
+				InvalidateFileCounts: ambiguousFileApp,
+			}); err != nil {
 			return stacktrace.Propagate(err, "failed to update file counts")
 		}
 	}
@@ -199,12 +210,16 @@ func (t *TrashRepository) CleanUpDeletedFilesFromCollection(ctx context.Context,
 	}
 	defer tx.Rollback()
 	updationTime := time.Microseconds()
-	rows, err := tx.QueryContext(ctx, `UPDATE collection_files AS cf
+	rows, err := tx.QueryContext(ctx, database.SQL(t.DB,
+		`UPDATE collection_files AS cf
 		SET is_deleted = TRUE, updation_time = $2
 		FROM collections AS c
 		WHERE cf.file_id = ANY($1) AND cf.is_deleted = FALSE
 			AND c.collection_id = cf.collection_id
-		RETURNING cf.collection_id, c.owner_id = $3`, pq.Array(fileIDs), updationTime, userID)
+		RETURNING cf.collection_id, c.owner_id = $3`, `UPDATE collection_files AS cf
+		SET is_deleted = TRUE, updation_time = $2
+		WHERE file_id IN (SELECT value FROM json_each($1)) AND is_deleted = FALSE RETURNING collection_id, (SELECT owner_id=$3 FROM collections WHERE collections.collection_id=collection_files.collection_id)`), database.Array(t.DB,
+		fileIDs), updationTime, userID)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -223,13 +238,16 @@ func (t *TrashRepository) CleanUpDeletedFilesFromCollection(ctx context.Context,
 	if err := rows.Err(); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE collections SET updation_time = $1
-		WHERE collection_id = ANY ($2)`, updationTime, pq.Array(cIDs))
+	_, err = tx.ExecContext(ctx, database.SQL(t.DB,
+		`UPDATE collections SET updation_time = $1
+		WHERE collection_id = ANY ($2)`, `UPDATE collections SET updation_time = $1
+		WHERE collection_id IN (SELECT value FROM json_each($2))`), updationTime, database.Array(t.DB,
+		cIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
 	if removedOwnedMembership {
-		if _, err := applyUsageChange(ctx, tx, userID, usageChange{InvalidateFileCounts: true}); err != nil {
+		if _, err := applyUsageChange(ctx, t.DB, tx, userID, usageChange{InvalidateFileCounts: true}); err != nil {
 			return stacktrace.Propagate(err, "failed to invalidate file counts")
 		}
 	}
@@ -269,7 +287,7 @@ func (t *TrashRepository) Delete(ctx context.Context, userID int64, fileIDs []in
 		return stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	if err := lockFiles(ctx, tx, userID, fileIDs); err != nil {
+	if err := lockFiles(ctx, t.DB, tx, userID, fileIDs); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
 	fileIDsInTrash, _, err := t.getFilesInTrashState(ctx, tx, userID, fileIDs)
@@ -278,7 +296,9 @@ func (t *TrashRepository) Delete(ctx context.Context, userID int64, fileIDs []in
 	}
 
 	logrus.WithField("fileIDs", fileIDsInTrash).Info("deleting files")
-	_, err = tx.ExecContext(ctx, `UPDATE trash SET is_deleted= true WHERE file_id = ANY ($1)`, pq.Array(fileIDsInTrash))
+	_, err = tx.ExecContext(ctx, database.SQL(t.DB,
+		`UPDATE trash SET is_deleted= true WHERE file_id = ANY ($1)`, `UPDATE trash SET is_deleted= true WHERE file_id IN (SELECT value FROM json_each($1))`), database.Array(t.DB,
+		fileIDsInTrash))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -291,9 +311,13 @@ func (t *TrashRepository) Delete(ctx context.Context, userID int64, fileIDs []in
 }
 
 func (t *TrashRepository) getFilesInTrashState(ctx context.Context, tx *sql.Tx, userID int64, fileIDs []int64) ([]int64, bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT file_id FROM trash
+	rows, err := tx.QueryContext(ctx, database.SQL(t.DB,
+		`SELECT file_id FROM trash
 			WHERE user_id = $1 AND file_id = ANY ($2)
-			AND is_deleted = FALSE AND is_restored = FALSE`, userID, pq.Array(fileIDs))
+			AND is_deleted = FALSE AND is_restored = FALSE`, `SELECT file_id FROM trash
+			WHERE user_id = $1 AND file_id IN (SELECT value FROM json_each($2))
+			AND is_deleted = FALSE AND is_restored = FALSE`), userID, database.Array(t.DB,
+		fileIDs))
 	if err != nil {
 		return nil, false, stacktrace.Propagate(err, "")
 	}
@@ -314,9 +338,13 @@ func (t *TrashRepository) getFilesInTrashState(ctx context.Context, tx *sql.Tx, 
 }
 
 func (t *TrashRepository) getFilesInTrashOrDeleted(ctx context.Context, tx *sql.Tx, userID int64, fileIDs []int64) ([]int64, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT file_id FROM trash
+	rows, err := tx.QueryContext(ctx, database.SQL(t.DB,
+		`SELECT file_id FROM trash
 			WHERE user_id = $1 AND file_id = ANY ($2)
-			AND is_restored = FALSE`, userID, pq.Array(fileIDs))
+			AND is_restored = FALSE`, `SELECT file_id FROM trash
+			WHERE user_id = $1 AND file_id IN (SELECT value FROM json_each($2))
+			AND is_restored = FALSE`), userID, database.Array(t.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -328,9 +356,13 @@ func (t *TrashRepository) getFilesInTrashOrDeleted(ctx context.Context, tx *sql.
 }
 
 func (t *TrashRepository) verifyFilesAreDeleted(ctx context.Context, userID int64, fileIDs []int64) error {
-	rows, err := t.DB.QueryContext(ctx, `SELECT file_id FROM trash 
-			WHERE user_id = $1 AND file_id = ANY ($2) 
-			AND is_deleted = TRUE AND is_restored = FALSE`, userID, pq.Array(fileIDs))
+	rows, err := t.DB.QueryContext(ctx, database.SQL(t.DB,
+		`SELECT file_id FROM trash
+			WHERE user_id = $1 AND file_id = ANY ($2)
+			AND is_deleted = TRUE AND is_restored = FALSE`, `SELECT file_id FROM trash
+			WHERE user_id = $1 AND file_id IN (SELECT value FROM json_each($2))
+			AND is_deleted = TRUE AND is_restored = FALSE`), userID, database.Array(t.DB,
+		fileIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -349,9 +381,13 @@ func (t *TrashRepository) verifyFilesAreDeleted(ctx context.Context, userID int6
 		return stacktrace.NewError("all file ids are not deleted from trash")
 	}
 
-	row := t.DB.QueryRowContext(ctx, `SELECT EXISTS (
+	row := t.DB.QueryRowContext(ctx, database.SQL(t.DB,
+		`SELECT EXISTS (
 		SELECT 1 FROM object_keys WHERE file_id = ANY($1) AND is_deleted = FALSE
-	)`, pq.Array(fileIDs))
+	)`, `SELECT EXISTS (
+		SELECT 1 FROM object_keys WHERE file_id IN (SELECT value FROM json_each($1)) AND is_deleted = FALSE
+	)`), database.Array(t.DB,
+		fileIDs))
 	var hasLiveObjects bool
 	err = row.Scan(&hasLiveObjects)
 	if err != nil {
@@ -368,10 +404,16 @@ func (t *TrashRepository) verifyFilesAreDeleted(ctx context.Context, userID int6
 	return nil
 }
 
-func (t *TrashRepository) GetFilesIDsForDeletion(userID int64, lastUpdatedAt int64, app ente.App) ([]int64, error) {
-	rows, err := t.DB.Query(`SELECT t.file_id FROM trash t
+func (t *TrashRepository) GetFilesIDsForDeletion(userID int64, lastUpdatedAt int64, app ente.App, limit int) ([]int64, error) {
+	query := `SELECT t.file_id FROM trash t
                 JOIN collections c ON c.collection_id = t.collection_id
-                WHERE t.user_id = $1 AND t.updated_at <= $2 AND t.is_deleted = FALSE AND t.is_restored = FALSE AND c.app = $3`, userID, lastUpdatedAt, app)
+                WHERE t.user_id = $1 AND t.updated_at <= $2 AND t.is_deleted = FALSE AND t.is_restored = FALSE AND c.app = $3`
+	args := []any{userID, lastUpdatedAt, app}
+	if limit > 0 {
+		query += " ORDER BY t.file_id LIMIT $4"
+		args = append(args, limit)
+	}
+	rows, err := t.DB.Query(query, args...)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -407,9 +449,9 @@ func (t *TrashRepository) HasItems(ctx context.Context, userID int64) (bool, err
 }
 
 func (t *TrashRepository) GetUserIDToFileIDsMapForDeletion() (map[int64][]int64, error) {
-	rows, err := t.DB.Query(`SELECT user_id, file_id FROM trash 
+	rows, err := t.DB.Query(`SELECT user_id, file_id FROM trash
 			WHERE delete_by <= $1  AND is_deleted IS FALSE AND is_restored IS FALSE limit $2`,
-		time.Microseconds(), TrashDiffLimit)
+		time.Microseconds(), workerjobs.BatchSize(TrashDiffLimit, 1))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -432,11 +474,16 @@ func (t *TrashRepository) GetUserIDToFileIDsMapForDeletion() (map[int64][]int64,
 // Wait 50 days for compliance deletion locks, and never split an updated_at
 // group across batches.
 func (t *TrashRepository) GetFileIdsForDroppingMetadata(sinceUpdatedAt int64) ([]FileWithUpdatedAt, error) {
-	rows, err := t.DB.Query(`
+	rows, err := t.DB.Query(database.SQL(t.DB,
+		`
 		select file_id, updated_at from trash  where is_deleted=true AND updated_at > $1
 AND updated_at < (now_utc_micro_seconds() - (24::BIGINT * 50* 60 * 60 * 1000 * 1000))
 order by updated_at ASC limit $2
-`, sinceUpdatedAt, TrashDiffLimit+1)
+`, `
+		select file_id, updated_at from trash  where is_deleted=true AND updated_at > $1
+AND updated_at < (CAST(unixepoch('subsec') * 1000000 AS INTEGER) - (24 * 50* 60 * 60 * 1000 * 1000))
+order by updated_at ASC limit $2
+`), sinceUpdatedAt, TrashDiffLimit+1)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}

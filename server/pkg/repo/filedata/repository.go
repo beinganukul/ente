@@ -10,8 +10,8 @@ import (
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/ente/filedata"
 	"github.com/ente/museum/pkg/repo"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type Repository struct {
@@ -27,13 +27,14 @@ const (
 
 func (r *Repository) InsertOrUpdate(ctx context.Context, data filedata.Row) error {
 	// Delay replication to avoid failing immediate update retries.
-	query := `
-        INSERT INTO file_data 
-            (file_id, user_id, data_type, size, latest_bucket, sync_locked_till) 
-        VALUES 
+	query := database.SQL(r.DB,
+		`
+        INSERT INTO file_data
+            (file_id, user_id, data_type, size, latest_bucket, sync_locked_till)
+        VALUES
             ($1, $2, $3, $4, $5, now_utc_micro_seconds() + 10 * 60 * 1000*1000)
         ON CONFLICT (file_id, data_type)
-        DO UPDATE SET 
+        DO UPDATE SET
             size = EXCLUDED.size,
             delete_from_buckets = array(
                 SELECT DISTINCT elem FROM unnest(
@@ -48,7 +49,21 @@ func (r *Repository) InsertOrUpdate(ctx context.Context, data filedata.Row) erro
             pending_sync = true,
             latest_bucket = EXCLUDED.latest_bucket,
             updated_at = now_utc_micro_seconds()
-        WHERE file_data.is_deleted = false`
+        WHERE file_data.is_deleted = false`, `
+        INSERT INTO file_data
+            (file_id, user_id, data_type, size, latest_bucket, sync_locked_till)
+        VALUES
+            ($1, $2, $3, $4, $5, CAST(unixepoch('subsec') * 1000000 AS INTEGER) + 10 * 60 * 1000*1000)
+        ON CONFLICT (file_id, data_type)
+        DO UPDATE SET
+            size = EXCLUDED.size,
+            delete_from_buckets = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each(json_insert((SELECT json_group_array(value) FROM (SELECT value FROM json_each((SELECT json_group_array(value) FROM (SELECT value FROM json_each(file_data.replicated_buckets) UNION ALL SELECT value FROM json_each(file_data.delete_from_buckets)))) UNION ALL SELECT value FROM json_each(file_data.inflight_rep_buckets))), '$[#]', CASE WHEN file_data.latest_bucket != EXCLUDED.latest_bucket THEN file_data.latest_bucket  END)) AS value
+                WHERE value IS NOT NULL AND value != EXCLUDED.latest_bucket)),
+            replicated_buckets = '[]',
+            pending_sync = true,
+            latest_bucket = EXCLUDED.latest_bucket,
+            updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+        WHERE file_data.is_deleted = false`)
 	_, err := r.DB.ExecContext(ctx, query,
 		data.FileID, data.UserID, string(data.Type), data.Size, data.LatestBucket)
 	if err != nil {
@@ -66,13 +81,14 @@ func (r *Repository) InsertOrUpdatePreviewData(ctx context.Context, data filedat
 		return stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	query := `
-        INSERT INTO file_data 
-            (file_id, user_id, data_type, size, latest_bucket, obj_id, obj_nonce, obj_size, sync_locked_till) 
-        VALUES 
+	query := database.SQL(r.DB,
+		`
+        INSERT INTO file_data
+            (file_id, user_id, data_type, size, latest_bucket, obj_id, obj_nonce, obj_size, sync_locked_till)
+        VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, now_utc_micro_seconds() + 10 * 60 * 1000*1000)
         ON CONFLICT (file_id, data_type)
-        DO UPDATE SET 
+        DO UPDATE SET
             size = EXCLUDED.size,
             delete_from_buckets = array(
                 SELECT DISTINCT elem FROM unnest(
@@ -90,7 +106,24 @@ func (r *Repository) InsertOrUpdatePreviewData(ctx context.Context, data filedat
             obj_nonce = excluded.obj_nonce,
             obj_size = excluded.obj_size,
             updated_at = now_utc_micro_seconds()
-        WHERE file_data.is_deleted = false`
+        WHERE file_data.is_deleted = false`, `
+        INSERT INTO file_data
+            (file_id, user_id, data_type, size, latest_bucket, obj_id, obj_nonce, obj_size, sync_locked_till)
+        VALUES
+            ($1, $2, $3, $4, $5, $6, $7, $8, CAST(unixepoch('subsec') * 1000000 AS INTEGER) + 10 * 60 * 1000*1000)
+        ON CONFLICT (file_id, data_type)
+        DO UPDATE SET
+            size = EXCLUDED.size,
+            delete_from_buckets = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each(json_insert((SELECT json_group_array(value) FROM (SELECT value FROM json_each((SELECT json_group_array(value) FROM (SELECT value FROM json_each(file_data.replicated_buckets) UNION ALL SELECT value FROM json_each(file_data.delete_from_buckets)))) UNION ALL SELECT value FROM json_each(file_data.inflight_rep_buckets))), '$[#]', CASE WHEN file_data.latest_bucket != EXCLUDED.latest_bucket THEN file_data.latest_bucket  END)) AS value
+                WHERE value IS NOT NULL AND value != EXCLUDED.latest_bucket)),
+            replicated_buckets = '[]',
+            pending_sync = true,
+            latest_bucket = EXCLUDED.latest_bucket,
+            obj_id = EXCLUDED.obj_id,
+            obj_nonce = excluded.obj_nonce,
+            obj_size = excluded.obj_size,
+            updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+        WHERE file_data.is_deleted = false`)
 	_, err = tx.ExecContext(ctx, query,
 		data.FileID, data.UserID, string(data.Type), data.Size, data.LatestBucket, *data.ObjectID, data.ObjectNonce, data.ObjectSize)
 	if err != nil {
@@ -104,13 +137,19 @@ func (r *Repository) InsertOrUpdatePreviewData(ctx context.Context, data filedat
 }
 
 func (r *Repository) GetFilesData(ctx context.Context, oType ente.ObjectType, fileIDs []int64) ([]filedata.Row, error) {
-	rows, err := r.DB.QueryContext(ctx, `SELECT file_id, user_id, data_type, size, latest_bucket, replicated_buckets, delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted, sync_locked_till, created_at, updated_at, obj_id, obj_nonce, obj_size
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB,
+		`SELECT file_id, user_id, data_type, size, latest_bucket, replicated_buckets, delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted, sync_locked_till, created_at, updated_at, obj_id, obj_nonce, obj_size
 										FROM file_data
-										WHERE data_type = $1 AND file_id = ANY($2)`, string(oType), pq.Array(fileIDs))
+										WHERE data_type = $1 AND file_id = ANY($2)`, `SELECT file_id, user_id, data_type, size, latest_bucket, replicated_buckets, delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted, sync_locked_till, created_at, updated_at, obj_id, obj_nonce, obj_size
+										FROM file_data
+										WHERE data_type = $1 AND file_id IN (SELECT value FROM json_each($2))`), string(oType), database.Array(r.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
-	return convertRowsToFilesData(rows)
+	return convertRowsToFilesData(r.DB,
+
+		rows)
 }
 
 func (r *Repository) GetFileData(ctx context.Context, fileIDs int64) ([]filedata.Row, error) {
@@ -120,18 +159,24 @@ func (r *Repository) GetFileData(ctx context.Context, fileIDs int64) ([]filedata
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
-	return convertRowsToFilesData(rows)
+	return convertRowsToFilesData(r.DB,
+
+		rows)
 }
 
 func (r *Repository) AddBucket(row filedata.Row, bucketID string, columnName string) error {
-	query := fmt.Sprintf(`
+	query := fmt.Sprintf(database.SQL(r.DB,
+		`
         UPDATE file_data
         SET %s = array(
             SELECT DISTINCT elem FROM unnest(
                 array_append(file_data.%s, $1)
             ) AS elem
         )
-        WHERE file_id = $2 AND data_type = $3 and user_id = $4`, columnName, columnName)
+        WHERE file_id = $2 AND data_type = $3 and user_id = $4`, `
+        UPDATE file_data
+        SET %s = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each(json_insert(file_data.%s, '$[#]', $1)) AS value))
+        WHERE file_id = $2 AND data_type = $3 and user_id = $4`), columnName, columnName)
 	result, err := r.DB.Exec(query, bucketID, row.FileID, string(row.Type), row.UserID)
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to add bucket to %s", columnName)
@@ -147,7 +192,8 @@ func (r *Repository) AddBucket(row filedata.Row, bucketID string, columnName str
 }
 
 func (r *Repository) RemoveBucket(row filedata.Row, bucketID string, columnName string) error {
-	query := fmt.Sprintf(`
+	query := fmt.Sprintf(database.SQL(r.DB,
+		`
         UPDATE file_data
         SET %s = array(
             SELECT DISTINCT elem FROM unnest(
@@ -158,7 +204,11 @@ func (r *Repository) RemoveBucket(row filedata.Row, bucketID string, columnName 
             ) AS elem
             WHERE elem IS NOT NULL
         )
-        WHERE file_id = $2 AND data_type = $3 and user_id = $4`, columnName, columnName)
+        WHERE file_id = $2 AND data_type = $3 and user_id = $4`, `
+        UPDATE file_data
+        SET %s = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each((SELECT json_group_array(value) FROM json_each(file_data.%s) WHERE value IS NOT $1)) AS value
+            WHERE value IS NOT NULL))
+        WHERE file_id = $2 AND data_type = $3 and user_id = $4`), columnName, columnName)
 	result, err := r.DB.Exec(query, bucketID, row.FileID, string(row.Type), row.UserID)
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to remove bucket from %s", columnName)
@@ -176,7 +226,7 @@ func (r *Repository) RemoveBucket(row filedata.Row, bucketID string, columnName 
 func (r *Repository) GetFDForUser(ctx context.Context, userID int64, lastUpdatedAt int64, limit int64) ([]filedata.FDStatus, error) {
 	rows, err := r.DB.QueryContext(ctx, `SELECT file_id, user_id, data_type, size, is_deleted, obj_id, obj_nonce, updated_at
 										FROM file_data
-										WHERE user_id = $1 AND updated_at > $2 ORDER BY updated_at  
+										WHERE user_id = $1 AND updated_at > $2 ORDER BY updated_at
 										LIMIT $3`, userID, lastUpdatedAt, limit)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
@@ -194,7 +244,8 @@ func (r *Repository) GetFDForUser(ctx context.Context, userID int64, lastUpdated
 }
 
 func (r *Repository) MoveBetweenBuckets(row filedata.Row, bucketID string, sourceColumn string, destColumn string) error {
-	query := fmt.Sprintf(`
+	query := fmt.Sprintf(database.SQL(r.DB,
+		`
   UPDATE file_data
   SET %s = array(
    SELECT DISTINCT elem FROM unnest(
@@ -214,7 +265,13 @@ func (r *Repository) MoveBetweenBuckets(row filedata.Row, bucketID string, sourc
    ) AS elem
    WHERE elem IS NOT NULL
   )
-  WHERE file_id = $2 AND data_type = $3 and user_id = $4`, destColumn, destColumn, sourceColumn, sourceColumn)
+  WHERE file_id = $2 AND data_type = $3 and user_id = $4`, `
+  UPDATE file_data
+  SET %s = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each(json_insert(file_data.%s, '$[#]', $1)) AS value
+   WHERE value IS NOT NULL)),
+  %s = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each((SELECT json_group_array(value) FROM json_each(file_data.%s) WHERE value IS NOT $1)) AS value
+   WHERE value IS NOT NULL))
+  WHERE file_id = $2 AND data_type = $3 and user_id = $4`), destColumn, destColumn, sourceColumn, sourceColumn)
 	result, err := r.DB.Exec(query, bucketID, row.FileID, string(row.Type), row.UserID)
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to move bucket from %s to %s", sourceColumn, destColumn)
@@ -238,13 +295,20 @@ func (r *Repository) GetPendingSyncDataAndExtendLock(ctx context.Context, newSyn
 		return nil, stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	row := tx.QueryRow(`SELECT file_id, user_id, data_type, size, latest_bucket, replicated_buckets, delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted, sync_locked_till, created_at, updated_at, obj_id, obj_nonce, obj_size
+	row := tx.QueryRow(database.SQL(r.DB,
+		`SELECT file_id, user_id, data_type, size, latest_bucket, replicated_buckets, delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted, sync_locked_till, created_at, updated_at, obj_id, obj_nonce, obj_size
 		FROM file_data
 		where pending_sync = true and is_deleted = $1 and sync_locked_till < now_utc_micro_seconds()
 		LIMIT 1
-		FOR UPDATE SKIP LOCKED`, forDeletion)
+		FOR UPDATE SKIP LOCKED`, `SELECT file_id, user_id, data_type, size, latest_bucket, replicated_buckets, delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted, sync_locked_till, created_at, updated_at, obj_id, obj_nonce, obj_size
+		FROM file_data
+		where pending_sync = true and is_deleted = $1 and sync_locked_till < CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+		LIMIT 1`), forDeletion)
 	var fileData filedata.Row
-	err = row.Scan(&fileData.FileID, &fileData.UserID, &fileData.Type, &fileData.Size, &fileData.LatestBucket, pq.Array(&fileData.ReplicatedBuckets), pq.Array(&fileData.DeleteFromBuckets), pq.Array(&fileData.InflightReplicas), &fileData.PendingSync, &fileData.IsDeleted, &fileData.SyncLockedTill, &fileData.CreatedAt, &fileData.UpdatedAt, &fileData.ObjectID, &fileData.ObjectNonce, &fileData.ObjectSize)
+	err = row.Scan(&fileData.FileID, &fileData.UserID, &fileData.Type, &fileData.Size, &fileData.LatestBucket, database.Array(r.DB,
+		&fileData.ReplicatedBuckets), database.Array(r.DB,
+		&fileData.DeleteFromBuckets), database.Array(r.DB,
+		&fileData.InflightReplicas), &fileData.PendingSync, &fileData.IsDeleted, &fileData.SyncLockedTill, &fileData.CreatedAt, &fileData.UpdatedAt, &fileData.ObjectID, &fileData.ObjectNonce, &fileData.ObjectSize)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -283,7 +347,8 @@ func (r *Repository) RegisterReplicationAttempt(ctx context.Context, row filedat
 
 // Reset only after replication finishes and only if the lock has not changed.
 func (r *Repository) ResetSyncLock(ctx context.Context, row filedata.Row, syncLockedTill int64) error {
-	query := `UPDATE file_data SET sync_locked_till = now_utc_micro_seconds() WHERE pending_sync = false and file_id = $1 AND data_type = $2 AND user_id = $3 AND sync_locked_till = $4`
+	query := database.SQL(r.DB,
+		`UPDATE file_data SET sync_locked_till = now_utc_micro_seconds() WHERE pending_sync = false and file_id = $1 AND data_type = $2 AND user_id = $3 AND sync_locked_till = $4`, `UPDATE file_data SET sync_locked_till = CAST(unixepoch('subsec') * 1000000 AS INTEGER) WHERE pending_sync = false and file_id = $1 AND data_type = $2 AND user_id = $3 AND sync_locked_till = $4`)
 	_, err := r.DB.ExecContext(ctx, query, row.FileID, string(row.Type), row.UserID, syncLockedTill)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
@@ -292,10 +357,14 @@ func (r *Repository) ResetSyncLock(ctx context.Context, row filedata.Row, syncLo
 }
 
 func (r *Repository) DeleteFileData(ctx context.Context, row filedata.Row) error {
-	query := `
+	query := database.SQL(r.DB,
+		`
 	DELETE FROM file_data
-	WHERE file_id = $1 AND data_type = $2 AND latest_bucket = $3 AND user_id = $4 
-  	AND replicated_buckets = ARRAY[]::s3region[] AND delete_from_buckets = ARRAY[]::s3region[] and inflight_rep_buckets = ARRAY[]::s3region[] and is_deleted=True`
+	WHERE file_id = $1 AND data_type = $2 AND latest_bucket = $3 AND user_id = $4
+	AND replicated_buckets = ARRAY[]::s3region[] AND delete_from_buckets = ARRAY[]::s3region[] and inflight_rep_buckets = ARRAY[]::s3region[] and is_deleted=True`, `
+	DELETE FROM file_data
+	WHERE file_id = $1 AND data_type = $2 AND latest_bucket = $3 AND user_id = $4
+	AND replicated_buckets = '[]' AND delete_from_buckets = '[]' and inflight_rep_buckets = '[]' and is_deleted=True`)
 	res, err := r.DB.ExecContext(ctx, query, row.FileID, string(row.Type), row.LatestBucket, row.UserID)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
@@ -322,11 +391,14 @@ func (r *Repository) DeleteFileData(ctx context.Context, row filedata.Row) error
 	return nil
 }
 
-func convertRowsToFilesData(rows *sql.Rows) ([]filedata.Row, error) {
+func convertRowsToFilesData(db *sql.DB, rows *sql.Rows) ([]filedata.Row, error) {
 	var filesData []filedata.Row
 	for rows.Next() {
 		var fileData filedata.Row
-		err := rows.Scan(&fileData.FileID, &fileData.UserID, &fileData.Type, &fileData.Size, &fileData.LatestBucket, pq.Array(&fileData.ReplicatedBuckets), pq.Array(&fileData.DeleteFromBuckets), pq.Array(&fileData.InflightReplicas), &fileData.PendingSync, &fileData.IsDeleted, &fileData.SyncLockedTill, &fileData.CreatedAt, &fileData.UpdatedAt, &fileData.ObjectID, &fileData.ObjectNonce, &fileData.ObjectSize)
+		err := rows.Scan(&fileData.FileID, &fileData.UserID, &fileData.Type, &fileData.Size, &fileData.LatestBucket, database.Array(db,
+			&fileData.ReplicatedBuckets), database.Array(db,
+			&fileData.DeleteFromBuckets), database.Array(db,
+			&fileData.InflightReplicas), &fileData.PendingSync, &fileData.IsDeleted, &fileData.SyncLockedTill, &fileData.CreatedAt, &fileData.UpdatedAt, &fileData.ObjectID, &fileData.ObjectNonce, &fileData.ObjectSize)
 		if err != nil {
 			return nil, stacktrace.Propagate(err, "")
 		}

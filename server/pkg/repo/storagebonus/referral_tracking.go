@@ -3,13 +3,13 @@ package storagebonus
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
+	"runtime"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/ente/storagebonus"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 )
 
@@ -29,8 +29,7 @@ func (r *Repository) TrackReferralAndInviteeBonus(ctx context.Context, invitee, 
 	}(tx)
 	_, err = tx.ExecContext(ctx, "INSERT INTO referral_tracking (invitee_id, invitor_id, plan_type) VALUES ($1, $2, $3)", invitee, codeOwnerId, planType)
 	if err != nil {
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == "23505" && pqErr.Constraint == "referral_tracking_invitee_id_idx" {
+		if database.IsUniqueViolation(err) {
 			return stacktrace.Propagate(storagebonus.CodeAlreadyAppliedErr, "invitee %d has already applied a referral code", invitee)
 		}
 		return stacktrace.Propagate(err, "failed to insert storagebonus tracking entry for invitee %d, invitor %d and planType %s", invitee, codeOwnerId, planType)
@@ -119,7 +118,12 @@ func (r *Repository) HasAppliedReferral(ctx context.Context, invitee int64) (boo
 }
 
 func (r *Repository) GetReferredForUpgradeBonus(ctx context.Context) ([]storagebonus.Tracking, error) {
-	rows, err := r.DB.QueryContext(ctx, "SELECT invitee_id, invitor_id, plan_type FROM referral_tracking WHERE invitee_on_paid_plan = FALSE AND invitee_id IN (SELECT user_id FROM subscriptions WHERE product_id != $1 and expiry_time > now_utc_micro_seconds())", ente.FreePlanProductID)
+	query := database.SQL(r.DB,
+		"SELECT invitee_id, invitor_id, plan_type FROM referral_tracking WHERE invitee_on_paid_plan = FALSE AND invitee_id IN (SELECT user_id FROM subscriptions WHERE product_id != $1 and expiry_time > now_utc_micro_seconds())", `SELECT invitee_id, invitor_id, plan_type FROM referral_tracking WHERE invitee_on_paid_plan = FALSE AND invitee_id IN (SELECT user_id FROM subscriptions WHERE product_id != $1 and expiry_time > CAST(unixepoch('subsec') * 1000000 AS INTEGER))`)
+	if runtime.GOOS == "js" {
+		query += " ORDER BY invitee_id LIMIT 1"
+	}
+	rows, err := r.DB.QueryContext(ctx, query, ente.FreePlanProductID)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to get list of result")
 	}
@@ -142,7 +146,8 @@ func (r *Repository) GetReferredForUpgradeBonus(ctx context.Context) ([]storageb
 }
 
 func (r *Repository) GetReferredForDowngradePenalty(ctx context.Context) ([]storagebonus.Tracking, error) {
-	rows, err := r.DB.QueryContext(ctx, "SELECT invitee_id, invitor_id, plan_type FROM referral_tracking WHERE invitee_on_paid_plan = TRUE AND invitee_id IN (SELECT user_id FROM subscriptions WHERE expiry_time < now_utc_micro_seconds())")
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB,
+		"SELECT invitee_id, invitor_id, plan_type FROM referral_tracking WHERE invitee_on_paid_plan = TRUE AND invitee_id IN (SELECT user_id FROM subscriptions WHERE expiry_time < now_utc_micro_seconds())", `SELECT invitee_id, invitor_id, plan_type FROM referral_tracking WHERE invitee_on_paid_plan = TRUE AND invitee_id IN (SELECT user_id FROM subscriptions WHERE expiry_time < CAST(unixepoch('subsec') * 1000000 AS INTEGER))`))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to get list of result")
 	}

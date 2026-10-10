@@ -2,6 +2,7 @@ package usercache
 
 import (
 	"context"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/ente/cache"
@@ -29,9 +30,9 @@ func (c *Controller) GetUserFileCountWithCache(userID int64, app ente.App) (int6
 	}
 	if count, ok := c.UserCache.GetFileCount(userID, app); ok {
 		// Cache hit, update the cache asynchronously
-		go func() {
+		workerjobs.Background(func() {
 			_, _ = c.getUserCountAndUpdateCache(userID, app, count)
-		}()
+		})
 		return count.Count, nil
 	}
 	return c.getUserCountAndUpdateCache(userID, app, nil)

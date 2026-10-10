@@ -18,6 +18,7 @@ import (
 	contactrepo "github.com/ente/museum/pkg/repo/contact"
 	cleanuprepo "github.com/ente/museum/pkg/repo/datacleanup"
 	"github.com/ente/museum/pkg/utils/config"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/time"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
@@ -338,15 +339,16 @@ func waitForDataCleanupRowLock(t *testing.T, db *sql.DB) {
 	deadline := stdtime.Now().Add(2 * stdtime.Second)
 	for {
 		var waiting bool
-		err := db.QueryRow(`SELECT EXISTS(
+		if database.IsTurso(db) {
+			waiting = database.WaitingTransactions(db) > 0
+		} else if err := db.QueryRow(`SELECT EXISTS(
 			SELECT 1 FROM pg_stat_activity
 			WHERE datname = current_database()
 			  AND pid <> pg_backend_pid()
 			  AND wait_event_type = 'Lock'
 			  AND query LIKE '%data_cleanup%'
 			  AND query LIKE '%FOR UPDATE%'
-		)`).Scan(&waiting)
-		if err != nil {
+		)`).Scan(&waiting); err != nil {
 			t.Fatalf("failed to inspect recovery lock wait: %v", err)
 		}
 		if waiting {

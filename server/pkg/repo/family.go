@@ -6,9 +6,9 @@ import (
 	"errors"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 )
 
 type FamilyRepository struct {
@@ -26,8 +26,8 @@ func (repo *FamilyRepository) CreateFamily(ctx context.Context, adminID int64) e
 		return stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO families(id, admin_id, member_id, status) 
-			VALUES($1, $2, $3, $4) ON CONFLICT (admin_id,member_id) 
+	_, err = tx.ExecContext(ctx, `INSERT INTO families(id, admin_id, member_id, status)
+			VALUES($1, $2, $3, $4) ON CONFLICT (admin_id,member_id)
 			    DO UPDATE SET status = $4 WHERE families.status NOT IN ($4)`, uuid.New(), adminID, adminID, ente.SELF)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
@@ -77,10 +77,13 @@ func (repo *FamilyRepository) AddMemberInvite(ctx context.Context, adminID int64
 		return "", stacktrace.Propagate(errors.New("memberID and adminID can not be same"), "")
 	}
 	// Reinviting must not replace an invite token or reopen an accepted membership.
-	_, err := repo.DB.ExecContext(ctx, `INSERT INTO families(id, admin_id, member_id, status, token, storage_limit) 
-			VALUES($1, $2, $3, $4, $5, $6) ON CONFLICT (admin_id,member_id) 
-			    DO UPDATE SET(status, token) = ($4, $5) WHERE  NOT (families.status = ANY($7))`,
-		uuid.New(), adminID, memberID, ente.INVITED, inviteToken, storageLimit, pq.Array([]ente.MemberStatus{ente.INVITED, ente.ACCEPTED}))
+	_, err := repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+		`INSERT INTO families(id, admin_id, member_id, status, token, storage_limit)
+			VALUES($1, $2, $3, $4, $5, $6) ON CONFLICT (admin_id,member_id)
+			    DO UPDATE SET(status, token) = ($4, $5) WHERE  NOT (families.status = ANY($7))`, `INSERT INTO families(id, admin_id, member_id, status, token, storage_limit)
+			VALUES($1, $2, $3, $4, $5, $6) ON CONFLICT (admin_id,member_id)
+			    DO UPDATE SET(status, token) = ($4, $5) WHERE  NOT (families.status IN (SELECT value FROM json_each($7)))`), uuid.New(), adminID, memberID, ente.INVITED, inviteToken, storageLimit, database.Array(repo.DB,
+		[]ente.MemberStatus{ente.INVITED, ente.ACCEPTED}))
 	if err != nil {
 		return "", stacktrace.Propagate(err, "")
 	}
@@ -111,8 +114,11 @@ func (repo *FamilyRepository) convertRowToFamilyMember(row *sql.Row) (ente.Famil
 }
 
 func (repo *FamilyRepository) GetMembersWithStatus(adminID int64, statuses []ente.MemberStatus) ([]ente.FamilyMember, error) {
-	rows, err := repo.DB.Query(`SELECT id, admin_id, member_id, status, storage_limit from families
-		WHERE admin_id = $1 and status = ANY($2)`, adminID, pq.Array(statuses))
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`SELECT id, admin_id, member_id, status, storage_limit from families
+		WHERE admin_id = $1 and status = ANY($2)`, `SELECT id, admin_id, member_id, status, storage_limit from families
+		WHERE admin_id = $1 and status IN (SELECT value FROM json_each($2))`), adminID, database.Array(repo.DB,
+		statuses))
 
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")

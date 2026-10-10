@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"strconv"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type NotificationsRepository struct {
@@ -46,13 +46,19 @@ func (r *NotificationsRepository) List(ctx context.Context, recipientSpaceID, cu
 	if limit > 100 {
 		limit = 100
 	}
-	query := `WITH visible AS (
+	query := database.SQL(r.DB, `WITH visible AS (
 		SELECT n.*, l.post_id, CASE
 			WHEN n.kind = 'post_like' THEN l.post_id::text
 			WHEN n.kind IN ('friend_accepted', 'poke') THEN n.actor_space_id
 			ELSE n.notification_id
 		END AS group_id
-		` + notificationSourcesSQL + ` WHERE n.recipient_space_id = $1 AND ` + notificationVisibleSQL + `
+		`, `WITH visible AS (
+		SELECT n.*, l.post_id, CASE
+			WHEN n.kind = 'post_like' THEN CAST(l.post_id AS TEXT)
+			WHEN n.kind IN ('friend_accepted', 'poke') THEN n.actor_space_id
+			ELSE n.notification_id
+		END AS group_id
+		`) + notificationSourcesSQL + ` WHERE n.recipient_space_id = $1 AND ` + notificationVisibleSQL + `
 	), ranked AS (
 		SELECT notification_id, kind, actor_space_id, post_id, friend_request_id, created_at, group_id,
 			ROW_NUMBER() OVER (PARTITION BY kind, group_id ORDER BY created_at DESC, notification_id DESC) AS position
@@ -65,7 +71,7 @@ func (r *NotificationsRepository) List(ctx context.Context, recipientSpaceID, cu
 		args = append(args, createdAt, id)
 	}
 	args = append(args, limit+1)
-	query += ` ORDER BY created_at DESC, notification_id DESC LIMIT $` + strconv.Itoa(len(args)) + `
+	query += ` ORDER BY created_at DESC, notification_id DESC LIMIT $` + strconv.Itoa(len(args)) + database.SQL(r.DB, `
 	), grouped AS MATERIALIZED (
 		SELECT visible.kind, visible.group_id,
 			ARRAY_AGG(visible.notification_id) AS notification_ids,
@@ -75,7 +81,17 @@ func (r *NotificationsRepository) List(ctx context.Context, recipientSpaceID, cu
 		JOIN page ON page.kind = visible.kind AND page.group_id = visible.group_id
 		GROUP BY visible.kind, visible.group_id
 	)
-	SELECT page.notification_id, grouped.notification_ids, page.kind, page.post_id, page.friend_request_id, page.created_at, grouped.actor_count, grouped.unread, ` + spaceActorSelectColumns("actor", "avatar", "actor") + `
+	SELECT page.notification_id, grouped.notification_ids, page.kind, page.post_id, page.friend_request_id, page.created_at, grouped.actor_count, grouped.unread, `, `
+	), grouped AS MATERIALIZED (
+		SELECT visible.kind, visible.group_id,
+			json_group_array(visible.notification_id) AS notification_ids,
+			CASE WHEN visible.kind = 'post_like' THEN COUNT(*) ELSE 1 END AS actor_count,
+			MAX(visible.read_at IS NULL) AS unread
+		FROM visible
+		JOIN page ON page.kind = visible.kind AND page.group_id = visible.group_id
+		GROUP BY visible.kind, visible.group_id
+	)
+	SELECT page.notification_id, grouped.notification_ids, page.kind, page.post_id, page.friend_request_id, page.created_at, grouped.actor_count, grouped.unread, `) + spaceActorSelectColumns("actor", "avatar", "actor") + `
 	FROM page
 	JOIN grouped ON grouped.kind = page.kind AND grouped.group_id = page.group_id
 	JOIN ranked sample ON sample.kind = page.kind AND sample.group_id = page.group_id
@@ -92,7 +108,7 @@ func (r *NotificationsRepository) List(ctx context.Context, recipientSpaceID, cu
 	for rows.Next() {
 		var item SpaceNotificationRecord
 		var actor SpaceActorRecord
-		dest := []any{&item.NotificationID, pq.Array(&item.NotificationIDs), &item.Kind, &item.PostID, &item.FriendRequestID, &item.CreatedAt, &item.ActorCount, &item.Unread}
+		dest := []any{&item.NotificationID, database.Array(r.DB, &item.NotificationIDs), &item.Kind, &item.PostID, &item.FriendRequestID, &item.CreatedAt, &item.ActorCount, &item.Unread}
 		dest = append(dest, spaceActorScanDest(&actor)...)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, "", stacktrace.Propagate(err, "")
@@ -125,11 +141,16 @@ func (r *NotificationsRepository) MarkRead(ctx context.Context, recipientSpaceID
 	_, err := r.DB.ExecContext(ctx, `
 		WITH visible AS (
 			SELECT n.notification_id
-			`+notificationSourcesSQL+` WHERE n.recipient_space_id = $1 AND n.notification_id = ANY($2) AND `+notificationVisibleSQL+`
+			`+notificationSourcesSQL+database.SQL(r.DB, ` WHERE n.recipient_space_id = $1 AND n.notification_id = ANY($2) AND `, ` WHERE n.recipient_space_id = $1 AND n.notification_id IN (SELECT value FROM json_each($2)) AND `)+notificationVisibleSQL+database.SQL(r.DB, `
 		)
-		UPDATE space_notifications n SET read_at = now_utc_micro_seconds()
+		UPDATE space_notifications AS n SET read_at = now_utc_micro_seconds()
 		FROM visible item
 		WHERE n.notification_id = item.notification_id AND n.read_at IS NULL
-	`, recipientSpaceID, pq.Array(notificationIDs))
+	`, `
+		)
+		UPDATE space_notifications AS n SET read_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+		FROM visible item
+		WHERE n.notification_id = item.notification_id AND n.read_at IS NULL
+	`), recipientSpaceID, database.Array(r.DB, notificationIDs))
 	return stacktrace.Propagate(err, "")
 }

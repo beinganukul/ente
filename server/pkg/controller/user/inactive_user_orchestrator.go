@@ -208,6 +208,7 @@ func NewInactiveUserOrchestrator(
 	}
 }
 
+// shortcut: this full scan can exceed Workers capacity; add a durable cursor before supporting large deployments.
 func (c *InactiveUserOrchestrator) ProcessInactiveUsers() {
 	lockUntil := time.MicrosecondsAfterHours(24)
 	if !c.LockController.TryLock(InactiveUserDeletionJobLock, lockUntil) {

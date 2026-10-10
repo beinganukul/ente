@@ -3,8 +3,6 @@ package ente
 import (
 	"database/sql/driver"
 	"encoding/json"
-
-	"github.com/ente/stacktrace"
 )
 
 type File struct {
@@ -56,11 +54,7 @@ func (fi *FileInfo) Scan(value interface{}) error {
 	if value == nil {
 		return nil
 	}
-	b, ok := value.([]byte)
-	if !ok {
-		return stacktrace.NewError("type assertion to []byte failed")
-	}
-	return json.Unmarshal(b, &fi)
+	return scanJSON(value, fi)
 }
 
 type UpdateFileResponse struct {
@@ -118,11 +112,7 @@ func (mmd *MagicMetadata) Scan(value interface{}) error {
 	if value == nil {
 		return nil
 	}
-	b, ok := value.([]byte)
-	if !ok {
-		return stacktrace.NewError("type assertion to []byte failed")
-	}
-	return json.Unmarshal(b, &mmd)
+	return scanJSON(value, mmd)
 }
 
 type UpdateMagicMetadata struct {

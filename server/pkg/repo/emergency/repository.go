@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type Repository struct {
@@ -41,16 +41,19 @@ func (r *Repository) AddEmergencyContact(ctx context.Context, userID int64, emer
 	if userID == emergencyContactID {
 		return false, ente.NewBadRequestWithMessage("user cannot add themself as emergency contact")
 	}
-	result, err := r.DB.ExecContext(ctx, `
+	result, err := r.DB.ExecContext(ctx, database.SQL(r.DB,
+		`
 INSERT INTO  emergency_contact(user_id, emergency_contact_id, state, encrypted_key, notice_period_in_hrs) VALUES ($1,$2,$3,$4,$5)
-ON CONFLICT (user_id, emergency_contact_id) DO UPDATE SET state=$3, encrypted_key=$4, notice_period_in_hrs=$5 
-WHERE emergency_contact.user_id=$1 AND emergency_contact.emergency_contact_id=$2 AND emergency_contact.state = ANY($6)`,
-		userID,
+ON CONFLICT (user_id, emergency_contact_id) DO UPDATE SET state=$3, encrypted_key=$4, notice_period_in_hrs=$5
+WHERE emergency_contact.user_id=$1 AND emergency_contact.emergency_contact_id=$2 AND emergency_contact.state = ANY($6)`, `
+INSERT INTO  emergency_contact(user_id, emergency_contact_id, state, encrypted_key, notice_period_in_hrs) VALUES ($1,$2,$3,$4,$5)
+ON CONFLICT (user_id, emergency_contact_id) DO UPDATE SET state=$3, encrypted_key=$4, notice_period_in_hrs=$5
+WHERE emergency_contact.user_id=$1 AND emergency_contact.emergency_contact_id=$2 AND emergency_contact.state IN (SELECT value FROM json_each($6))`), userID,
 		emergencyContactID,
 		ente.UserInvitedContact,
 		encKey,
-		noticeInHrs,
-		pq.Array([]ente.ContactState{ente.ContactDenied, ente.ContactLeft, ente.UserRevokedContact}))
+		noticeInHrs, database.Array(r.DB,
+			[]ente.ContactState{ente.ContactDenied, ente.ContactLeft, ente.UserRevokedContact}))
 	if err != nil {
 		return false, stacktrace.Propagate(err, "failed to insert/update")
 	}
@@ -62,10 +65,13 @@ WHERE emergency_contact.user_id=$1 AND emergency_contact.emergency_contact_id=$2
 }
 
 func (r *Repository) GetActiveContactForUser(ctx context.Context, userID int64) ([]*ContactRow, error) {
-	rows, err := r.DB.QueryContext(ctx,
-		`SELECT user_id, emergency_contact_id, state, notice_period_in_hrs, encrypted_key 
-				FROM emergency_contact WHERE (user_id=$1 or emergency_contact_id=$1) 
-				                         and state = ANY($2)`, userID, pq.Array([]ente.ContactState{ente.ContactAccepted, ente.UserInvitedContact}))
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB,
+		`SELECT user_id, emergency_contact_id, state, notice_period_in_hrs, encrypted_key
+				FROM emergency_contact WHERE (user_id=$1 or emergency_contact_id=$1)
+				                         and state = ANY($2)`, `SELECT user_id, emergency_contact_id, state, notice_period_in_hrs, encrypted_key
+				FROM emergency_contact WHERE (user_id=$1 or emergency_contact_id=$1)
+				                         and state IN (SELECT value FROM json_each($2))`), userID, database.Array(r.DB,
+		[]ente.ContactState{ente.ContactAccepted, ente.UserInvitedContact}))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -103,17 +109,19 @@ func (r *Repository) UpdateState(ctx context.Context,
 		return false, 0, stacktrace.Propagate(err, "failed to start emergency contact update")
 	}
 	defer tx.Rollback()
-	if err = lockOwnerForUpdate(ctx, tx, userID); err != nil {
+	if err = lockOwnerForUpdate(ctx, r.DB, tx, userID); err != nil {
 		return false, 0, err
 	}
 	allowedPreviousStates := getValidPreviousState(newState)
 	var result sql.Result
 	if newState == ente.ContactAccepted || newState == ente.UserInvitedContact {
-		result, err = tx.ExecContext(ctx, `UPDATE emergency_contact SET state=$1 WHERE user_id=$2 and emergency_contact_id=$3 and state = ANY($4)`,
-			newState, userID, emergencyContactID, pq.Array(allowedPreviousStates))
+		result, err = tx.ExecContext(ctx, database.SQL(r.DB,
+			`UPDATE emergency_contact SET state=$1 WHERE user_id=$2 and emergency_contact_id=$3 and state = ANY($4)`, `UPDATE emergency_contact SET state=$1 WHERE user_id=$2 and emergency_contact_id=$3 and state IN (SELECT value FROM json_each($4))`), newState, userID, emergencyContactID, database.Array(r.DB,
+			allowedPreviousStates))
 	} else {
-		result, err = tx.ExecContext(ctx, `UPDATE emergency_contact SET state=$1, encrypted_key = NULL WHERE user_id=$2 and emergency_contact_id=$3 and state = ANY($4)`,
-			newState, userID, emergencyContactID, pq.Array(allowedPreviousStates))
+		result, err = tx.ExecContext(ctx, database.SQL(r.DB,
+			`UPDATE emergency_contact SET state=$1, encrypted_key = NULL WHERE user_id=$2 and emergency_contact_id=$3 and state = ANY($4)`, `UPDATE emergency_contact SET state=$1, encrypted_key = NULL WHERE user_id=$2 and emergency_contact_id=$3 and state IN (SELECT value FROM json_each($4))`), newState, userID, emergencyContactID, database.Array(r.DB,
+			allowedPreviousStates))
 	}
 	if err != nil {
 		return false, 0, stacktrace.Propagate(err, "")
@@ -129,8 +137,9 @@ func (r *Repository) UpdateState(ctx context.Context,
 		if newState == ente.UserRevokedContact {
 			status = ente.RecoveryStatusRejected
 		}
-		result, err = tx.ExecContext(ctx, `UPDATE emergency_recovery SET status=$1 WHERE user_id=$2 AND emergency_contact_id=$3 AND status = ANY($4)`,
-			status, userID, emergencyContactID, pq.Array([]ente.RecoveryStatus{ente.RecoveryStatusWaiting, ente.RecoveryStatusReady}))
+		result, err = tx.ExecContext(ctx, database.SQL(r.DB,
+			`UPDATE emergency_recovery SET status=$1 WHERE user_id=$2 AND emergency_contact_id=$3 AND status = ANY($4)`, `UPDATE emergency_recovery SET status=$1 WHERE user_id=$2 AND emergency_contact_id=$3 AND status IN (SELECT value FROM json_each($4))`), status, userID, emergencyContactID, database.Array(r.DB,
+			[]ente.RecoveryStatus{ente.RecoveryStatusWaiting, ente.RecoveryStatusReady}))
 		if err != nil {
 			return false, 0, stacktrace.Propagate(err, "failed to cancel emergency recovery")
 		}
@@ -154,14 +163,14 @@ func (r *Repository) UpdateRecoveryNotice(ctx context.Context,
 		return stacktrace.Propagate(err, "failed to start recovery notice update")
 	}
 	defer tx.Rollback()
-	if err = lockOwnerForUpdate(ctx, tx, userID); err != nil {
+	if err = lockOwnerForUpdate(ctx, r.DB, tx, userID); err != nil {
 		return err
 	}
-	contact, err := getContactForUpdate(ctx, tx, userID, emergencyContactID)
+	contact, err := getContactForUpdate(ctx, r.DB, tx, userID, emergencyContactID)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
-	hasActiveSession, err := hasActiveRecovery(ctx, tx, userID, emergencyContactID)
+	hasActiveSession, err := hasActiveRecovery(ctx, r.DB, tx, userID, emergencyContactID)
 	if err != nil {
 		return err
 	}
@@ -179,15 +188,18 @@ func (r *Repository) UpdateRecoveryNotice(ctx context.Context,
 	return stacktrace.Propagate(tx.Commit(), "failed to commit recovery notice update")
 }
 
-func lockOwnerForUpdate(ctx context.Context, tx *sql.Tx, userID int64) error {
+func lockOwnerForUpdate(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64) error {
 	var lockedUserID int64
-	err := tx.QueryRowContext(ctx, `SELECT user_id FROM users WHERE user_id=$1 FOR NO KEY UPDATE`, userID).Scan(&lockedUserID)
+	err := tx.QueryRowContext(ctx, database.SQL(db,
+		`SELECT user_id FROM users WHERE user_id=$1 FOR NO KEY UPDATE`, `SELECT user_id FROM users WHERE user_id=$1`), userID).Scan(&lockedUserID)
 	return stacktrace.Propagate(err, "failed to lock recovery owner")
 }
 
-func getContactForUpdate(ctx context.Context, tx *sql.Tx, userID, emergencyContactID int64) (*ContactRow, error) {
-	row := tx.QueryRowContext(ctx, `SELECT user_id, emergency_contact_id, state, notice_period_in_hrs, encrypted_key
-		FROM emergency_contact WHERE user_id=$1 AND emergency_contact_id=$2 FOR UPDATE`, userID, emergencyContactID)
+func getContactForUpdate(ctx context.Context, db *sql.DB, tx *sql.Tx, userID, emergencyContactID int64) (*ContactRow, error) {
+	row := tx.QueryRowContext(ctx, database.SQL(db,
+		`SELECT user_id, emergency_contact_id, state, notice_period_in_hrs, encrypted_key
+		FROM emergency_contact WHERE user_id=$1 AND emergency_contact_id=$2 FOR UPDATE`, `SELECT user_id, emergency_contact_id, state, notice_period_in_hrs, encrypted_key
+		FROM emergency_contact WHERE user_id=$1 AND emergency_contact_id=$2`), userID, emergencyContactID)
 	var contact ContactRow
 	if err := row.Scan(&contact.UserID, &contact.EmergencyContactID, &contact.State, &contact.NoticePeriodInHrs, &contact.EncryptedKey); err != nil {
 		if err == sql.ErrNoRows {

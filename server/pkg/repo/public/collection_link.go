@@ -9,8 +9,8 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type CollectionLinkRepo struct {
@@ -61,7 +61,7 @@ func (pcr *CollectionLinkRepo) Insert(ctx context.Context,
 	_, err = tx.ExecContext(ctx, `INSERT INTO public_collection_tokens
     (collection_id, access_token, valid_till, device_limit, enable_collect, enable_comment, enable_join) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		cID, token, validTill, deviceLimit, enableCollect, enableComment, join)
-	if err != nil && err.Error() == "pq: duplicate key value violates unique constraint \"public_active_collection_unique_idx\"" {
+	if err != nil && database.IsUniqueViolationFor(err, "public_active_collection_unique_idx", "public_collection_tokens.collection_id, public_collection_tokens.is_disabled") {
 		return ente.ErrActiveLinkAlreadyExists
 	}
 	if err != nil {
@@ -90,9 +90,11 @@ func (pcr *CollectionLinkRepo) DisableSharing(ctx context.Context, cID int64) er
 
 // "Active" only means not disabled; links may be expired or over their limit.
 func (pcr *CollectionLinkRepo) GetCollectionToActivePublicURLMap(ctx context.Context, collectionIDs []int64, app ente.App) (map[int64][]ente.PublicURL, error) {
-	rows, err := pcr.DB.QueryContext(ctx, `SELECT collection_id, access_token, valid_till, device_limit, enable_download, enable_collect, enable_comment, enable_join, min_role, pw_nonce, mem_limit, ops_limit FROM
-                                                   public_collection_tokens WHERE collection_id = ANY($1) and is_disabled = FALSE`,
-		pq.Array(collectionIDs))
+	rows, err := pcr.DB.QueryContext(ctx, database.SQL(pcr.DB,
+		`SELECT collection_id, access_token, valid_till, device_limit, enable_download, enable_collect, enable_comment, enable_join, min_role, pw_nonce, mem_limit, ops_limit FROM
+                                                   public_collection_tokens WHERE collection_id = ANY($1) and is_disabled = FALSE`, `SELECT collection_id, access_token, valid_till, device_limit, enable_download, enable_collect, enable_comment, enable_join, min_role, pw_nonce, mem_limit, ops_limit FROM
+                                                   public_collection_tokens WHERE collection_id IN (SELECT value FROM json_each($1)) and is_disabled = FALSE`), database.Array(pcr.DB,
+		collectionIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -177,10 +179,12 @@ func (pcr *CollectionLinkRepo) GetUniqueAccessCount(ctx context.Context, shareId
 }
 
 func (pcr *CollectionLinkRepo) RecordAccessHistory(ctx context.Context, shareID int64, ip string, ua string) error {
-	_, err := pcr.DB.ExecContext(ctx, `INSERT INTO public_collection_access_history
+	_, err := pcr.DB.ExecContext(ctx, database.SQL(pcr.DB,
+		`INSERT INTO public_collection_access_history
     (share_id, ip, user_agent) VALUES ($1, $2, $3)
-    ON CONFLICT ON CONSTRAINT unique_access_sid_ip_ua DO NOTHING;`,
-		shareID, ip, ua)
+    ON CONFLICT ON CONSTRAINT unique_access_sid_ip_ua DO NOTHING;`, `INSERT INTO public_collection_access_history
+    (share_id, ip, user_agent) VALUES ($1, $2, $3)
+    ON CONFLICT (share_id, ip, user_agent) DO NOTHING;`), shareID, ip, ua)
 	return stacktrace.Propagate(err, "failed to record access history")
 }
 
@@ -231,7 +235,8 @@ func (pcr *CollectionLinkRepo) GetActivePublicTokenForUser(ctx context.Context, 
 }
 
 func (pcr *CollectionLinkRepo) CleanupAccessHistory(ctx context.Context) error {
-	_, err := pcr.DB.ExecContext(ctx, `DELETE FROM public_collection_access_history WHERE share_id IN (SELECT id FROM public_collection_tokens WHERE is_disabled = TRUE AND updated_at < (now_utc_micro_seconds() - (24::BIGINT * 30 * 60 * 60 * 1000 * 1000)))`)
+	_, err := pcr.DB.ExecContext(ctx, database.SQL(pcr.DB,
+		`DELETE FROM public_collection_access_history WHERE share_id IN (SELECT id FROM public_collection_tokens WHERE is_disabled = TRUE AND updated_at < (now_utc_micro_seconds() - (24::BIGINT * 30 * 60 * 60 * 1000 * 1000)))`, `DELETE FROM public_collection_access_history WHERE share_id IN (SELECT id FROM public_collection_tokens WHERE is_disabled = TRUE AND updated_at < (CAST(unixepoch('subsec') * 1000000 AS INTEGER) - (24 * 30 * 60 * 60 * 1000 * 1000)))`))
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to clean up public collection access history")
 	}

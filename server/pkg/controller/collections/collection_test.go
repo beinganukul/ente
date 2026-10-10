@@ -17,8 +17,8 @@ func TestGetCollectionPointResponsesForViewer(t *testing.T) {
 	collectionID := createShareTestCollection(t, collectionRepo, ownerID)
 	if _, err := db.Exec(
 		`UPDATE collections SET
-			magic_metadata = '{"version":1,"count":1,"data":"private-collection","header":"private-header"}'::jsonb,
-			pub_magic_metadata = '{"version":1,"count":1,"data":"public-collection","header":"public-header"}'::jsonb
+			magic_metadata = '{"version":1,"count":1,"data":"private-collection","header":"private-header"}',
+			pub_magic_metadata = '{"version":1,"count":1,"data":"public-collection","header":"public-header"}'
 		 WHERE collection_id = $1`,
 		collectionID,
 	); err != nil {
@@ -93,8 +93,8 @@ func TestGetFileForViewer(t *testing.T) {
 	fileID := addShareTestOwnerFile(t, db, collectionID, ownerID)
 	if _, err := db.Exec(
 		`UPDATE files SET
-			magic_metadata = '{"version":1,"count":1,"data":"private-file","header":"private-header"}'::jsonb,
-			pub_magic_metadata = '{"version":1,"count":1,"data":"public-file","header":"public-header"}'::jsonb
+			magic_metadata = '{"version":1,"count":1,"data":"private-file","header":"private-header"}',
+			pub_magic_metadata = '{"version":1,"count":1,"data":"public-file","header":"public-header"}'
 		 WHERE file_id = $1`,
 		fileID,
 	); err != nil {

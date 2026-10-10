@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"io"
 	"net/http"
 	"os"
@@ -150,7 +151,7 @@ func (c *PushController) SendPushes() {
 	defer c.releaseTaskLock()
 
 	tokens, err := c.PushRepo.GetTokensToBeNotified(time.MicrosecondsBeforeMinutes(pushIntervalInMinutes),
-		concurrentPushesInOneShot)
+		workerjobs.BatchSize(concurrentPushesInOneShot, 5))
 	if err != nil {
 		log.Error(fmt.Errorf("error fetching tokens to be notified: %v", err))
 		return

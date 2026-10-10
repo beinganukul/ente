@@ -5,9 +5,9 @@ import (
 	"database/sql"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type PushTokenRepository struct {
@@ -15,13 +15,32 @@ type PushTokenRepository struct {
 }
 
 func (repo *PushTokenRepository) AddToken(userID int64, sessionTokenHash []byte, token ente.PushTokenRequest) error {
+	if database.IsTurso(repo.DB) {
+		tx, err := repo.DB.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		result, err := tx.Exec(`INSERT INTO push_tokens(user_id,fcm_token,apns_token,session_token_hash,platform) SELECT user_id,$2,$3,token_hash,$5 FROM tokens WHERE user_id=$1 AND token_hash=$4 AND is_deleted=false ON CONFLICT(fcm_token) DO UPDATE SET user_id=EXCLUDED.user_id,apns_token=EXCLUDED.apns_token,session_token_hash=EXCLUDED.session_token_hash,platform=EXCLUDED.platform`, userID, token.FCMToken, token.APNSToken, sessionTokenHash, token.Platform)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return ente.ErrAuthenticationRequired
+		}
+		return tx.Commit()
+	}
+
 	result, err := repo.DB.Exec(`INSERT INTO push_tokens(user_id, fcm_token, apns_token, session_token_hash, platform)
 			SELECT user_id, $2, $3, token_hash, $5 FROM tokens
 			WHERE user_id = $1 AND token_hash = $4 AND is_deleted = false FOR SHARE
 			ON CONFLICT (fcm_token) DO UPDATE
 			SET user_id = EXCLUDED.user_id, apns_token = EXCLUDED.apns_token, session_token_hash = EXCLUDED.session_token_hash,
-				platform = EXCLUDED.platform`,
-		userID, token.FCMToken, token.APNSToken, sessionTokenHash, token.Platform)
+				platform = EXCLUDED.platform`, userID, token.FCMToken, token.APNSToken, sessionTokenHash, token.Platform)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -59,11 +78,15 @@ func (repo *PushTokenRepository) GetTokensToBeNotified(lastNotificationTime int6
 }
 
 func (repo *PushTokenRepository) GetTokensForAlbumShare(ctx context.Context, userIDs []int64) ([]ente.PushToken, error) {
-	rows, err := repo.DB.QueryContext(ctx, `SELECT p.fcm_token FROM push_tokens p
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT p.fcm_token FROM push_tokens p
 		JOIN tokens t ON t.token_hash = p.session_token_hash AND t.user_id = p.user_id AND t.is_deleted = false AND t.app = $3
 		JOIN remote_store r ON r.user_id = p.user_id AND r.key_name = $2 AND r.key_value = 'true'
-		WHERE p.user_id = ANY($1) AND p.platform = 'android'`,
-		pq.Array(userIDs), string(ente.IsInternalUser), string(ente.Photos))
+		WHERE p.user_id = ANY($1) AND p.platform = 'android'`, `SELECT p.fcm_token FROM push_tokens p
+		JOIN tokens t ON t.token_hash = p.session_token_hash AND t.user_id = p.user_id AND t.is_deleted = false AND t.app = $3
+		JOIN remote_store r ON r.user_id = p.user_id AND r.key_name = $2 AND r.key_value = 'true'
+		WHERE p.user_id IN (SELECT value FROM json_each($1)) AND p.platform = 'android'`), database.Array(repo.DB,
+		userIDs), string(ente.IsInternalUser), string(ente.Photos))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -84,7 +107,9 @@ func (repo *PushTokenRepository) SetLastNotificationTimeToNow(pushTokens []ente.
 	for _, pushToken := range pushTokens {
 		fcmTokens = append(fcmTokens, pushToken.FCMToken)
 	}
-	_, err := repo.DB.Exec(`UPDATE push_tokens SET last_notified_at = $1 WHERE fcm_token = ANY($2)`, time.Microseconds(), pq.Array(fcmTokens))
+	_, err := repo.DB.Exec(database.SQL(repo.DB,
+		`UPDATE push_tokens SET last_notified_at = $1 WHERE fcm_token = ANY($2)`, `UPDATE push_tokens SET last_notified_at = $1 WHERE fcm_token IN (SELECT value FROM json_each($2))`), time.Microseconds(), database.Array(repo.DB,
+		fcmTokens))
 	return stacktrace.Propagate(err, "Could not set last notification time")
 }
 
@@ -94,7 +119,9 @@ func (repo *PushTokenRepository) RemoveTokensOlderThan(creationTime int64) error
 }
 
 func (repo *PushTokenRepository) RemoveTokensByFCM(fcmTokens []string) error {
-	_, err := repo.DB.Exec(`DELETE FROM push_tokens WHERE fcm_token = ANY($1)`, pq.Array(fcmTokens))
+	_, err := repo.DB.Exec(database.SQL(repo.DB,
+		`DELETE FROM push_tokens WHERE fcm_token = ANY($1)`, `DELETE FROM push_tokens WHERE fcm_token IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		fcmTokens))
 	return stacktrace.Propagate(err, "")
 }
 

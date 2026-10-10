@@ -2,8 +2,10 @@ package data_cleanup
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 
 	"github.com/ente/museum/ente"
 	entity "github.com/ente/museum/ente/data_cleanup"
@@ -27,7 +29,7 @@ type DeleteUserCleanupController struct {
 }
 
 type SpaceDataRepo interface {
-	DeleteUserData(ctx context.Context, userID int64) error
+	DeleteUserDataTx(ctx context.Context, tx *sql.Tx, userID int64) error
 }
 
 const (
@@ -47,7 +49,7 @@ func (c *DeleteUserCleanupController) DeleteDataCron() {
 	}()
 
 	ctx := context.Background()
-	items, err := c.Repo.GetItemsPendingCompletion(ctx, 100)
+	items, err := c.Repo.GetItemsPendingCompletion(ctx, workerjobs.BatchSize(100, 1))
 	if err != nil {
 		log.WithError(err).Info("Failed to get items for cleanup")
 		return
@@ -121,6 +123,7 @@ func (c *DeleteUserCleanupController) startCleanup(ctx context.Context, item *en
 	return c.Repo.MoveToNextStage(ctx, item.UserID, entity.Collection, time.Microseconds())
 }
 
+// shortcut: this account stage is unbounded; make it resumable before deleting accounts with many collections on Workers.
 func (c *DeleteUserCleanupController) deleteCollections(ctx context.Context, item *entity.DataCleanup) error {
 	collectionsMap, err := c.CollectionRepo.GetCollectionIDsOwnedByUser(item.UserID)
 	if err != nil {
@@ -153,16 +156,24 @@ func (c *DeleteUserCleanupController) emptyTrash(ctx context.Context, item *enti
 }
 
 func (c *DeleteUserCleanupController) completeCleanup(ctx context.Context, item *entity.DataCleanup) error {
+	tx, err := c.Repo.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return stacktrace.Propagate(err, "begin account cleanup")
+	}
+	defer tx.Rollback()
 	if c.SpaceDataRepo != nil {
-		if err := c.SpaceDataRepo.DeleteUserData(ctx, item.UserID); err != nil {
+		if err := c.SpaceDataRepo.DeleteUserDataTx(ctx, tx, item.UserID); err != nil {
 			return stacktrace.Propagate(err, "failed to delete space data for user")
 		}
 	}
-	err := c.Repo.DeleteTableData(ctx, item.UserID)
+	err = c.Repo.DeleteTableDataTx(ctx, tx, item.UserID)
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to delete table data for user")
 	}
-	return c.Repo.MoveToNextStage(ctx, item.UserID, entity.Completed, time.Microseconds())
+	if err := c.Repo.MoveToNextStageTx(ctx, tx, item.UserID, entity.Completed, time.Microseconds()); err != nil {
+		return err
+	}
+	return stacktrace.Propagate(tx.Commit(), "commit account cleanup")
 }
 
 // storageCheck validates that user's usage is zero after all collections are deleted and trashed files are processed.

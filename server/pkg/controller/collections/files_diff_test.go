@@ -38,9 +38,9 @@ func TestFileDiffScrubsDeletedFiles(t *testing.T) {
 			thumbnail_decryption_header = 'current-thumbnail-header',
 			metadata_decryption_header = 'current-metadata-header',
 			encrypted_metadata = 'current-encrypted-metadata',
-			magic_metadata = '{"version":2,"count":1,"data":"current-private-metadata","header":"private-header"}'::jsonb,
-			pub_magic_metadata = '{"version":2,"count":1,"data":"current-public-metadata","header":"public-header"}'::jsonb,
-			info = '{"fileSize":123,"thumbSize":45}'::jsonb
+			magic_metadata = '{"version":2,"count":1,"data":"current-private-metadata","header":"private-header"}',
+			pub_magic_metadata = '{"version":2,"count":1,"data":"current-public-metadata","header":"public-header"}',
+			info = '{"fileSize":123,"thumbSize":45}'
 		 WHERE file_id = $1`,
 		deletedFileID,
 	); err != nil {

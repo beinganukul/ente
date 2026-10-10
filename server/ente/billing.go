@@ -4,7 +4,6 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 
-	"github.com/ente/stacktrace"
 	"github.com/stripe/stripe-go/v72"
 	"github.com/stripe/stripe-go/v72/client"
 )
@@ -119,12 +118,7 @@ func (ca SubscriptionAttributes) Value() (driver.Value, error) {
 }
 
 func (ca *SubscriptionAttributes) Scan(value interface{}) error {
-	b, ok := value.([]byte)
-	if !ok {
-		return stacktrace.NewError("type assertion to []byte failed")
-	}
-
-	return json.Unmarshal(b, &ca)
+	return scanJSON(value, ca)
 }
 
 type SubscriptionVerificationRequest struct {

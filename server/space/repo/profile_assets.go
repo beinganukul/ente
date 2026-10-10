@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -47,13 +48,18 @@ func IsProfileAssetObjectID(objectID string) bool {
 	return objectID != "" && !strings.Contains(objectID, "/")
 }
 
-func getProfileAssetsForUpdateTx(ctx context.Context, tx *sql.Tx, spaceID string) (map[string]profileAssetRecord, error) {
-	rows, err := tx.QueryContext(ctx, `
+func getProfileAssetsForUpdateTx(ctx context.Context, db *sql.DB, tx *sql.Tx, spaceID string) (map[string]profileAssetRecord, error) {
+	rows, err := tx.QueryContext(ctx, database.SQL(db, `
 		SELECT space_id, asset_type, object_id, bucket_id, size
 		FROM space_profile_assets
 		WHERE space_id = $1
 		FOR UPDATE
-	`, spaceID)
+	`, `
+		SELECT space_id, asset_type, object_id, bucket_id, size
+		FROM space_profile_assets
+		WHERE space_id = $1
+
+	`), spaceID)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}

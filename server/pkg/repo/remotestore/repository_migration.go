@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/ente/stacktrace"
@@ -19,8 +20,10 @@ func (r *Repository) MigrateCustomDomainCanonicalValues(ctx context.Context) err
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.QueryContext(ctx, `SELECT user_id, key_value, canonical_value FROM remote_store
-		WHERE key_name = $1 FOR UPDATE`, ente.CustomDomain)
+	rows, err := tx.QueryContext(ctx, database.SQL(r.DB,
+		`SELECT user_id, key_value, canonical_value FROM remote_store
+		WHERE key_name = $1 FOR UPDATE`, `SELECT user_id, key_value, canonical_value FROM remote_store
+		WHERE key_name = $1`), ente.CustomDomain)
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to fetch custom domains")
 	}

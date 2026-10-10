@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 
 	"github.com/ente/stacktrace"
 )
@@ -26,15 +25,6 @@ func DeleteAllFilesInDirectory(path string) error {
 	}
 	err = os.RemoveAll(path)
 	return stacktrace.Propagate(err, "")
-}
-
-func FreeSpace(path string) (uint64, error) {
-	var fs syscall.Statfs_t
-	err := syscall.Statfs(path, &fs)
-	if err != nil {
-		return 0, err
-	}
-	return fs.Bfree * uint64(fs.Bsize), nil
 }
 
 func EnsureSufficientSpace(size int64) error {

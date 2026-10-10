@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/pkg/utils/time"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ente/stacktrace"
 	"github.com/gin-gonic/gin"
 )
@@ -27,7 +28,7 @@ func (c *Controller) AddContact(ctx *gin.Context, userID int64, request ente.Add
 		return stacktrace.Propagate(err, "")
 	}
 	if hasUpdated {
-		go c.sendContactNotification(ctx, userID, emergencyContactID, ente.UserInvitedContact)
+		workerjobs.Background(func() { c.sendContactNotification(ctx, userID, emergencyContactID, ente.UserInvitedContact) })
 	}
 	return nil
 }

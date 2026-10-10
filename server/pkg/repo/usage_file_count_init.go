@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/database"
 )
 
 var ErrFileCountIneligible = errors.New("file counts are ineligible")
@@ -34,7 +35,7 @@ type fileCountInitSnapshot struct {
 
 func (repo *UsageRepository) readFileCountInitSnapshot(ctx context.Context, userID int64) (fileCountInitSnapshot, error) {
 	var counts fileCountInitSnapshot
-	err := repo.DB.QueryRowContext(ctx, `WITH owned_collections AS MATERIALIZED (
+	err := repo.DB.QueryRowContext(ctx, database.SQL(repo.DB, `WITH owned_collections AS MATERIALIZED (
 		SELECT collection_id, app FROM collections WHERE owner_id = $1
 	), memberships AS MATERIALIZED (
 		SELECT cf.file_id, c.app, f.owner_id, cf.f_owner_id
@@ -70,7 +71,43 @@ func (repo *UsageRepository) readFileCountInitSnapshot(ctx context.Context, user
 			ELSE ''
 		END
 	FROM usage AS u CROSS JOIN source
-	WHERE u.user_id = $1`, userID).Scan(
+	WHERE u.user_id = $1`, `WITH owned_collections AS MATERIALIZED (
+		SELECT collection_id, app FROM collections WHERE owner_id = $1
+	), memberships AS MATERIALIZED (
+		SELECT cf.file_id, c.app, f.owner_id, cf.f_owner_id
+		FROM owned_collections AS c
+		JOIN collection_files AS cf ON cf.collection_id = c.collection_id AND cf.is_deleted = FALSE
+		JOIN files AS f ON f.file_id = cf.file_id
+	), owned_files AS MATERIALIZED (
+		SELECT DISTINCT file_id FROM memberships WHERE owner_id = $1
+	), source AS (
+		SELECT
+			COUNT(DISTINCT file_id) FILTER (WHERE owner_id = $1 AND app = 'photos') AS photos,
+			COUNT(DISTINCT file_id) FILTER (WHERE owner_id = $1 AND app = 'locker') AS locker,
+			MAX(app = 'locker' AND (f_owner_id IS NOT DISTINCT FROM $1) <> (owner_id = $1)) AS locker_mismatch
+		FROM memberships
+	)
+	SELECT u.file_count_source_version,
+		u.photos_file_count IS NULL AND u.locker_file_count IS NULL,
+		source.photos, source.locker,
+		CASE
+			WHEN EXISTS (
+				SELECT 1
+				FROM owned_files AS f
+				JOIN collection_files AS cf ON cf.file_id = f.file_id AND cf.is_deleted = FALSE
+				JOIN collections AS c ON c.collection_id = cf.collection_id
+				GROUP BY f.file_id
+				HAVING COUNT(DISTINCT c.app) > 1 OR MAX(c.app NOT IN ('photos', 'locker'))
+			) THEN 'cross-app or unsupported app memberships'
+			WHEN EXISTS (
+				SELECT 1 FROM owned_files AS f
+				JOIN trash AS t ON t.file_id = f.file_id AND t.is_restored = FALSE
+			) THEN 'active membership or wrong owner in Trash'
+			WHEN source.locker_mismatch THEN 'Locker ownership predicates disagree'
+			ELSE ''
+		END
+	FROM usage AS u CROSS JOIN source
+	WHERE u.user_id = $1`), userID).Scan(
 		&counts.version, &counts.uninitialized, &counts.photos, &counts.locker, &counts.ineligibilityReason)
 	return counts, err
 }

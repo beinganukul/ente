@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"github.com/ente/museum/pkg/utils/database"
 	"os"
 	"testing"
 
@@ -11,6 +12,9 @@ import (
 func TestPendingUploadMetadataMigration(t *testing.T) {
 	testutil.WithServerRoot(t)
 	db := testutil.RequireTestDB(t)
+	if database.IsTurso(db) {
+		t.Skip("PostgreSQL historical migration; SQLite baseline validated by database schema parity tests")
+	}
 	tx, err := db.Begin()
 	require.NoError(t, err)
 	defer tx.Rollback()
@@ -20,7 +24,7 @@ func TestPendingUploadMetadataMigration(t *testing.T) {
 	    INSERT INTO temp_objects VALUES ('existing', 100);
 	    INSERT INTO space_temp_objects VALUES ('existing-space');`)
 	require.NoError(t, err)
-	migration, err := os.ReadFile("migrations/143_pending_upload_metadata.up.sql")
+	migration, err := os.ReadFile("migrations/postgres/143_pending_upload_metadata.up.sql")
 	require.NoError(t, err)
 	_, err = tx.Exec(string(migration))
 	require.NoError(t, err)
@@ -35,7 +39,7 @@ func TestPendingUploadMetadataMigration(t *testing.T) {
 	require.NoError(t, tx.QueryRow(`INSERT INTO temp_objects (object_key, expiration_time)
 	    VALUES ('old-writer', 200) RETURNING created_at`).Scan(&createdAt))
 	require.Positive(t, createdAt)
-	down, err := os.ReadFile("migrations/143_pending_upload_metadata.down.sql")
+	down, err := os.ReadFile("migrations/postgres/143_pending_upload_metadata.down.sql")
 	require.NoError(t, err)
 	_, err = tx.Exec(string(down))
 	require.NoError(t, err)

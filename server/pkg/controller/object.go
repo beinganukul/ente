@@ -10,6 +10,7 @@ import (
 	"github.com/ente/museum/pkg/utils/file"
 	"github.com/ente/museum/pkg/utils/s3config"
 	"github.com/ente/museum/pkg/utils/time"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ente/stacktrace"
 	log "github.com/sirupsen/logrus"
 )
@@ -49,7 +50,7 @@ func (c *ObjectController) RemoveComplianceHolds() {
 		c.LockController.ReleaseLock(RemoveComplianceHoldsLock)
 	}()
 
-	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.RemoveComplianceHoldQueue, 1500)
+	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.RemoveComplianceHoldQueue, workerjobs.BatchSize(1500, 1))
 	if err != nil {
 		log.WithError(err).Error("Failed to fetch items from queue")
 		return

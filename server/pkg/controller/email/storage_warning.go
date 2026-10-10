@@ -194,6 +194,7 @@ func buildStorageWarningRunSummary(stats storageWarningRunStats, runAt int64) st
 	)
 }
 
+// shortcut: snapshots and history cleanup require a full scan; make both resumable before supporting large Workers deployments.
 func (c *EmailNotificationController) SendStorageWarningMails() {
 	if c.UserRepo == nil || c.UsageRepo == nil || c.BillingRepo == nil || c.StorageBonusRepo == nil ||
 		c.LockController == nil || c.NotificationHistoryRepo == nil {

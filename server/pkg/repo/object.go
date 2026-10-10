@@ -8,8 +8,8 @@ import (
 	"strconv"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type ObjectRepository struct {
@@ -32,8 +32,7 @@ func (repo *ObjectRepository) objectLookupDB() *sql.DB {
 }
 
 func (repo *ObjectRepository) GetObjectsMissingInDC(dc string, limit int, random bool) ([]ente.S3ObjectKey, error) {
-	rows, err := repo.DB.Query(`SELECT file_id, o_type, object_key, size FROM object_keys 
-		WHERE is_deleted = false AND NOT($1 = ANY(datacenters)) limit $2`, dc, limit)
+	rows, err := repo.DB.Query(database.SQL(repo.DB, `SELECT file_id, o_type, object_key, size FROM object_keys WHERE is_deleted = false AND NOT($1 = ANY(datacenters)) limit $2`, `SELECT file_id,o_type,object_key,size FROM object_keys WHERE is_deleted=false AND NOT EXISTS(SELECT 1 FROM json_each(datacenters) WHERE value=$1) LIMIT $2`), dc, limit)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -50,8 +49,8 @@ func (repo *ObjectRepository) GetObjectsMissingInDC(dc string, limit int, random
 }
 
 func (repo *ObjectRepository) MarkObjectReplicated(objectKey string, datacenter string) (int64, error) {
-	result, err := repo.DB.Exec(`UPDATE object_keys SET datacenters = datacenters || $1::s3region WHERE object_key = $2`,
-		datacenter, objectKey)
+	result, err := repo.DB.Exec(database.SQL(repo.DB,
+		`UPDATE object_keys SET datacenters = datacenters || $1::s3region WHERE object_key = $2`, `UPDATE object_keys SET datacenters = json_insert(datacenters, '$[#]', $1) WHERE object_key = $2`), datacenter, objectKey)
 	if err != nil {
 		return 0, stacktrace.Propagate(err, "")
 	}
@@ -59,8 +58,11 @@ func (repo *ObjectRepository) MarkObjectReplicated(objectKey string, datacenter 
 }
 
 func (repo *ObjectRepository) GetObjectsForFileIDs(fileIDs []int64) ([]ente.S3ObjectKey, error) {
-	rows, err := repo.DB.Query(`SELECT file_id, o_type, object_key, size FROM object_keys 
-		WHERE file_id = ANY($1) AND is_deleted=false`, pq.Array(fileIDs))
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`SELECT file_id, o_type, object_key, size FROM object_keys
+		WHERE file_id = ANY($1) AND is_deleted=false`, `SELECT file_id, o_type, object_key, size FROM object_keys
+		WHERE file_id IN (SELECT value FROM json_each($1)) AND is_deleted=false`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -83,7 +85,8 @@ func (repo *ObjectRepository) GetObjectWithDCs(fileID int64, objType ente.Object
 	var s3ObjectKey ente.S3ObjectKey
 	var datacenters []string
 	s3ObjectKey.FileID = fileID
-	err := row.Scan(&s3ObjectKey.ObjectKey, &s3ObjectKey.FileSize, &s3ObjectKey.Type, pq.Array(&datacenters))
+	err := row.Scan(&s3ObjectKey.ObjectKey, &s3ObjectKey.FileSize, &s3ObjectKey.Type, database.Array(repo.DB,
+		&datacenters))
 	return s3ObjectKey, datacenters, stacktrace.Propagate(err, "")
 }
 
@@ -94,7 +97,8 @@ func (repo *ObjectRepository) GetAccessibleObject(ctx context.Context, fileID in
 
 // Keep access validation and object lookup in one latency-sensitive query.
 func (repo *ObjectRepository) GetAccessibleObjectWithDCs(ctx context.Context, fileID int64, actorUserID int64, objType ente.ObjectType) (ente.S3ObjectKey, []string, error) {
-	row := repo.objectLookupDB().QueryRowContext(ctx, `
+	row := repo.objectLookupDB().QueryRowContext(ctx, database.SQL(repo.DB,
+		`
 		SELECT
 			f.file_id,
 			CASE
@@ -119,8 +123,32 @@ func (repo *ObjectRepository) GetAccessibleObjectWithDCs(ctx context.Context, fi
 			ON ok.file_id = f.file_id
 			AND ok.o_type = $3::object_type
 			AND ok.is_deleted = FALSE
-		WHERE f.file_id = $1`,
-		fileID, actorUserID, objType, ente.ActionRemove)
+		WHERE f.file_id = $1`, `
+		SELECT
+			f.file_id,
+			CASE
+				WHEN f.owner_id = $2 THEN TRUE
+				ELSE EXISTS (
+					SELECT 1
+					FROM collection_files cf
+					JOIN collection_shares cs ON cs.collection_id = cf.collection_id
+					WHERE cf.file_id = f.file_id
+						AND cf.is_deleted = FALSE
+						AND cf.action IS DISTINCT FROM $4
+						AND cs.is_deleted = FALSE
+						AND (cs.to_user_id = $2 OR cs.from_user_id = $2)
+				)
+			END AS can_access,
+			ok.object_key,
+			ok.size,
+			ok.o_type,
+			COALESCE(ok.datacenters, '[]')
+		FROM files f
+		LEFT JOIN object_keys ok
+			ON ok.file_id = f.file_id
+			AND ok.o_type = $3
+			AND ok.is_deleted = FALSE
+		WHERE f.file_id = $1`), fileID, actorUserID, objType, ente.ActionRemove)
 
 	var s3ObjectKey ente.S3ObjectKey
 	var canAccess bool
@@ -133,8 +161,8 @@ func (repo *ObjectRepository) GetAccessibleObjectWithDCs(ctx context.Context, fi
 		&canAccess,
 		&objectKey,
 		&fileSize,
-		&objectType,
-		pq.Array(&datacenters),
+		&objectType, database.Array(repo.DB,
+			&datacenters),
 	)
 	if err != nil {
 		return s3ObjectKey, datacenters, stacktrace.Propagate(err, "")
@@ -158,7 +186,8 @@ func (repo *ObjectRepository) GetOwnedObject(ctx context.Context, fileID int64, 
 
 // Keep ownership validation and object lookup in one latency-sensitive query.
 func (repo *ObjectRepository) GetOwnedObjectWithDCs(ctx context.Context, fileID int64, ownerID int64, objType ente.ObjectType) (ente.S3ObjectKey, []string, error) {
-	row := repo.objectLookupDB().QueryRowContext(ctx, `
+	row := repo.objectLookupDB().QueryRowContext(ctx, database.SQL(repo.DB,
+		`
 		SELECT
 			f.file_id,
 			f.owner_id = $2 AS is_owner,
@@ -171,8 +200,20 @@ func (repo *ObjectRepository) GetOwnedObjectWithDCs(ctx context.Context, fileID 
 			ON ok.file_id = f.file_id
 			AND ok.o_type = $3::object_type
 			AND ok.is_deleted = FALSE
-		WHERE f.file_id = $1`,
-		fileID, ownerID, objType)
+		WHERE f.file_id = $1`, `
+		SELECT
+			f.file_id,
+			f.owner_id = $2 AS is_owner,
+			ok.object_key,
+			ok.size,
+			ok.o_type,
+			COALESCE(ok.datacenters, '[]')
+		FROM files f
+		LEFT JOIN object_keys ok
+			ON ok.file_id = f.file_id
+			AND ok.o_type = $3
+			AND ok.is_deleted = FALSE
+		WHERE f.file_id = $1`), fileID, ownerID, objType)
 
 	var s3ObjectKey ente.S3ObjectKey
 	var isOwner bool
@@ -185,8 +226,8 @@ func (repo *ObjectRepository) GetOwnedObjectWithDCs(ctx context.Context, fileID 
 		&isOwner,
 		&objectKey,
 		&fileSize,
-		&objectType,
-		pq.Array(&datacenters),
+		&objectType, database.Array(repo.DB,
+			&datacenters),
 	)
 	if err != nil {
 		return s3ObjectKey, datacenters, stacktrace.Propagate(err, "")
@@ -211,7 +252,8 @@ func (repo *ObjectRepository) GetCollectionObject(ctx context.Context, collectio
 // Keep collection access validation and object lookup in one latency-sensitive
 // query.
 func (repo *ObjectRepository) GetCollectionObjectWithDCs(ctx context.Context, collectionID int64, fileID int64, objType ente.ObjectType) (ente.S3ObjectKey, []string, error) {
-	row := repo.objectLookupDB().QueryRowContext(ctx, `
+	row := repo.objectLookupDB().QueryRowContext(ctx, database.SQL(repo.DB,
+		`
 		SELECT
 			cf.file_id,
 			ok.object_key,
@@ -226,8 +268,22 @@ func (repo *ObjectRepository) GetCollectionObjectWithDCs(ctx context.Context, co
 		WHERE cf.collection_id = $1
 			AND cf.file_id = $2
 			AND cf.is_deleted = FALSE
-			AND cf.action IS DISTINCT FROM $4`,
-		collectionID, fileID, objType, ente.ActionRemove)
+			AND cf.action IS DISTINCT FROM $4`, `
+		SELECT
+			cf.file_id,
+			ok.object_key,
+			ok.size,
+			ok.o_type,
+			COALESCE(ok.datacenters, '[]')
+		FROM collection_files cf
+		LEFT JOIN object_keys ok
+			ON ok.file_id = cf.file_id
+			AND ok.o_type = $3
+			AND ok.is_deleted = FALSE
+		WHERE cf.collection_id = $1
+			AND cf.file_id = $2
+			AND cf.is_deleted = FALSE
+			AND cf.action IS DISTINCT FROM $4`), collectionID, fileID, objType, ente.ActionRemove)
 
 	var s3ObjectKey ente.S3ObjectKey
 	var objectKey sql.NullString
@@ -238,8 +294,8 @@ func (repo *ObjectRepository) GetCollectionObjectWithDCs(ctx context.Context, co
 		&s3ObjectKey.FileID,
 		&objectKey,
 		&fileSize,
-		&objectType,
-		pq.Array(&datacenters),
+		&objectType, database.Array(repo.DB,
+			&datacenters),
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s3ObjectKey, datacenters, stacktrace.Propagate(ente.ErrPermissionDenied, "file not in collection")
@@ -257,8 +313,8 @@ func (repo *ObjectRepository) GetCollectionObjectWithDCs(ctx context.Context, co
 }
 
 func (repo *ObjectRepository) GetAllFileObjectsByObjectKey(objectKey string) ([]ente.S3ObjectKey, error) {
-	rows, err := repo.DB.Query(`SELECT file_id, o_type, object_key, size from object_keys where file_id in 
-                                                                (select file_id from object_keys where object_key= $1) 
+	rows, err := repo.DB.Query(`SELECT file_id, o_type, object_key, size from object_keys where file_id in
+                                                                (select file_id from object_keys where object_key= $1)
                                                             and is_deleted=false`, objectKey)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
@@ -267,7 +323,7 @@ func (repo *ObjectRepository) GetAllFileObjectsByObjectKey(objectKey string) ([]
 }
 
 func (repo *ObjectRepository) GetDataCentersForObject(objectKey string) ([]string, error) {
-	rows, err := repo.DB.Query(`select jsonb_array_elements_text(to_jsonb(datacenters)) from object_keys where object_key = $1`, objectKey)
+	rows, err := repo.DB.Query(database.SQL(repo.DB, `select jsonb_array_elements_text(to_jsonb(datacenters)) from object_keys where object_key = $1`, `SELECT value FROM object_keys,json_each(datacenters) WHERE object_key=$1`), objectKey)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -285,8 +341,8 @@ func (repo *ObjectRepository) GetDataCentersForObject(objectKey string) ([]strin
 }
 
 func (repo *ObjectRepository) RemoveDataCenterFromObject(objectKey string, datacenter string) error {
-	_, err := repo.DB.Exec(`UPDATE object_keys SET datacenters = array_remove(datacenters, $1) WHERE object_key = $2`,
-		datacenter, objectKey)
+	_, err := repo.DB.Exec(database.SQL(repo.DB,
+		`UPDATE object_keys SET datacenters = array_remove(datacenters, $1) WHERE object_key = $2`, `UPDATE object_keys SET datacenters = (SELECT json_group_array(value) FROM json_each(datacenters) WHERE value IS NOT $1) WHERE object_key = $2`), datacenter, objectKey)
 	return stacktrace.Propagate(err, "")
 }
 
@@ -297,8 +353,11 @@ func (repo *ObjectRepository) RemoveObjectsForKey(objectKey string) error {
 }
 
 func (repo *ObjectRepository) MarkObjectsAsDeletedForFileIDs(ctx context.Context, tx *sql.Tx, fileIDs []int64) ([]ente.S3ObjectKey, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT file_id, o_type, object_key, size FROM object_keys 
-		WHERE file_id = ANY($1) AND is_deleted=false FOR UPDATE`, pq.Array(fileIDs))
+	rows, err := tx.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT file_id, o_type, object_key, size FROM object_keys
+		WHERE file_id = ANY($1) AND is_deleted=false FOR UPDATE`, `SELECT file_id, o_type, object_key, size FROM object_keys
+		WHERE file_id IN (SELECT value FROM json_each($1)) AND is_deleted=false`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -327,7 +386,9 @@ func (repo *ObjectRepository) MarkObjectsAsDeletedForFileIDs(ctx context.Context
 	for _, fileID := range fileIDs {
 		embeddingsToBeDeleted = append(embeddingsToBeDeleted, strconv.FormatInt(fileID, 10))
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE file_data SET is_deleted = TRUE, pending_sync = TRUE WHERE file_id = ANY($1)`, pq.Array(fileIDs))
+	_, err = tx.ExecContext(ctx, database.SQL(repo.DB,
+		`UPDATE file_data SET is_deleted = TRUE, pending_sync = TRUE WHERE file_id = ANY($1)`, `UPDATE file_data SET is_deleted = TRUE, pending_sync = TRUE WHERE file_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -337,7 +398,9 @@ func (repo *ObjectRepository) MarkObjectsAsDeletedForFileIDs(ctx context.Context
 		return nil, stacktrace.Propagate(err, "")
 	}
 
-	_, err = tx.ExecContext(ctx, `UPDATE object_keys SET is_deleted = TRUE WHERE file_id = ANY($1)`, pq.Array(fileIDs))
+	_, err = tx.ExecContext(ctx, database.SQL(repo.DB,
+		`UPDATE object_keys SET is_deleted = TRUE WHERE file_id = ANY($1)`, `UPDATE object_keys SET is_deleted = TRUE WHERE file_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -384,9 +447,9 @@ func (repo *ObjectRepository) GetObjectReferenceStatuses(ctx context.Context, ob
 		statuses[objectKey] = ObjectReferenceStatus{ObjectKey: objectKey}
 	}
 
-	rows, err := repo.DB.QueryContext(ctx,
-		`SELECT object_key FROM object_keys WHERE object_key = ANY($1::text[])`,
-		pq.Array(objectKeys),
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT object_key FROM object_keys WHERE object_key = ANY($1::text[])`, `SELECT object_key FROM object_keys WHERE object_key IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		objectKeys),
 	)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
@@ -407,9 +470,9 @@ func (repo *ObjectRepository) GetObjectReferenceStatuses(ctx context.Context, ob
 		return nil, stacktrace.Propagate(err, "")
 	}
 
-	rows, err = repo.DB.QueryContext(ctx,
-		`SELECT object_key FROM temp_objects WHERE object_key = ANY($1::text[])`,
-		pq.Array(objectKeys),
+	rows, err = repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT object_key FROM temp_objects WHERE object_key = ANY($1::text[])`, `SELECT object_key FROM temp_objects WHERE object_key IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		objectKeys),
 	)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")

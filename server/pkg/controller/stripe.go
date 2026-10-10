@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"net/http"
 	"strconv"
 	"time"
@@ -231,14 +232,14 @@ func (c *StripeController) handleCheckoutSessionCompleted(event stripe.Event, co
 			newSubscription,
 		)
 		if isUpgradingFromFreePlan {
-			go func() {
+			workerjobs.Background(func() {
 				cur := currency.MustParseISO(string(session.Currency))
 				amount := fmt.Sprintf("%v%v", currency.Symbol(cur), float64(session.AmountTotal)/float64(100))
 				c.DiscordController.NotifyNewSub(userID, "stripe", amount)
-			}()
-			go func() {
+			})
+			workerjobs.Background(func() {
 				c.EmailNotificationCtrl.OnAccountUpgrade(userID)
-			}()
+			})
 		}
 		if err != nil {
 			return ente.StripeEventLog{}, stacktrace.Propagate(err, "")

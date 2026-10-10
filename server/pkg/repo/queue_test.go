@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ente/museum/internal/testutil"
+	"github.com/ente/museum/pkg/utils/database"
 )
 
 func TestOutdatedObjectQueueUsesNoDelayAndBatchLimit(t *testing.T) {
@@ -49,9 +50,12 @@ func TestDeleteOutdatedObjectQueueUsesComplianceDelay(t *testing.T) {
 		t.Fatalf("new delete outdated object item should not be ready, got %d item(s)", len(items))
 	}
 
-	_, err = db.Exec(`UPDATE queue
+	_, err = db.Exec(database.SQL(db,
+		`UPDATE queue
 		SET created_at = now_utc_micro_seconds() - (25::bigint * 24 * 60 * 60 * 1000000)
-		WHERE queue_name = $1 AND item = $2`, DeleteOutdatedObjectQueue, "delayed-object")
+		WHERE queue_name = $1 AND item = $2`, `UPDATE queue
+		SET created_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER) - (25 * 24 * 60 * 60 * 1000000)
+		WHERE queue_name = $1 AND item = $2`), DeleteOutdatedObjectQueue, "delayed-object")
 	if err != nil {
 		t.Fatalf("failed to age delete outdated object item: %v", err)
 	}
@@ -82,7 +86,7 @@ func setupQueueRepositoryTest(t *testing.T) (*QueueRepository, *sql.DB) {
 
 func truncateQueue(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.Exec(`TRUNCATE TABLE queue RESTART IDENTITY`); err != nil {
+	if _, err := db.Exec(database.SQL(db, `TRUNCATE TABLE queue RESTART IDENTITY`, `DELETE FROM queue`)); err != nil {
 		t.Fatalf("failed to reset queue table: %v", err)
 	}
 }

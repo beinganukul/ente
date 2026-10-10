@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -13,7 +14,8 @@ const plaintextTokenBatchSize = 5000
 func (repo *UserAuthRepository) MigratePlaintextTokens(ctx context.Context) (int64, error) {
 	var migrated int64
 	for {
-		result, err := repo.DB.ExecContext(ctx, `WITH batch AS (
+		result, err := repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+			`WITH batch AS (
 			SELECT token_hash FROM tokens
 			WHERE token IS NOT NULL
 			ORDER BY token
@@ -22,7 +24,15 @@ func (repo *UserAuthRepository) MigratePlaintextTokens(ctx context.Context) (int
 		)
 		UPDATE tokens SET token = NULL
 		FROM batch
-		WHERE tokens.token_hash = batch.token_hash`, plaintextTokenBatchSize)
+		WHERE tokens.token_hash = batch.token_hash`, `WITH batch AS (
+			SELECT token_hash FROM tokens
+			WHERE token IS NOT NULL
+			ORDER BY token
+			LIMIT $1
+		)
+		UPDATE tokens SET token = NULL
+		FROM batch
+		WHERE tokens.token_hash = batch.token_hash`), plaintextTokenBatchSize)
 		if err != nil {
 			return migrated, stacktrace.Propagate(err, "failed to clear plaintext tokens")
 		}

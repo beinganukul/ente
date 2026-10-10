@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"net/url"
 	"slices"
 	"strings"
@@ -118,12 +119,14 @@ func (c *Controller) InviteMember(ctx *gin.Context, adminUserID int64, email str
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	go func(token string) {
-		notificationErr := c.sendNotification(ctx, adminUserID, potentialMemberID, ente.INVITED, &token)
-		if notificationErr != nil {
-			logrus.WithError(notificationErr).Error("family-plan invite notification failed")
-		}
-	}(activeInviteToken)
+	workerjobs.Background(func() {
+		func(token string) {
+			notificationErr := c.sendNotification(ctx, adminUserID, potentialMemberID, ente.INVITED, &token)
+			if notificationErr != nil {
+				logrus.WithError(notificationErr).Error("family-plan invite notification failed")
+			}
+		}(activeInviteToken)
+	})
 	return nil
 }
 
@@ -148,12 +151,12 @@ func (c *Controller) RemoveMember(ctx context.Context, adminID int64, id uuid.UU
 	if err = c.clearFamilyCustomDomain(ctx, familyMember.MemberUserID); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	go func() {
+	workerjobs.Background(func() {
 		notificationErr := c.sendNotification(ctx, adminID, familyMember.MemberUserID, ente.REMOVED, nil)
 		if notificationErr != nil {
 			logrus.WithError(notificationErr).Error("family-plan remove notification failed")
 		}
-	}()
+	})
 	return nil
 }
 

@@ -205,8 +205,8 @@ func TestCreatePostAcceptsUpToTenObjects(t *testing.T) {
 					var queued bool
 					err = repos.Assets.DB.QueryRowContext(ctx, `SELECT EXISTS (
                         SELECT 1 FROM space_temp_objects WHERE object_key = $1 AND purpose = $2
-                        AND expires_at <= now_utc_micro_seconds() AND cleanup_after > now_utc_micro_seconds()
-                    )`, part.ObjectKey, spacerepo.TempObjectPurposePost).Scan(&queued)
+                        AND expires_at <= $3 AND cleanup_after > $3
+                    )`, part.ObjectKey, spacerepo.TempObjectPurposePost, timeutil.Microseconds()).Scan(&queued)
 					require.NoError(t, err)
 					require.True(t, queued)
 				}

@@ -7,6 +7,7 @@ import (
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/pkg/repo/emergency"
 	"github.com/ente/museum/pkg/utils/time"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ente/stacktrace"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -64,7 +65,9 @@ func (c *Controller) ChangePassword(ctx *gin.Context, userID int64, request ente
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
-	go c.sendRecoveryNotification(ctx, contact.UserID, contact.EmergencyContactID, ente.RecoveryStatusRecovered, nil)
+	workerjobs.Background(func() {
+		c.sendRecoveryNotification(ctx, contact.UserID, contact.EmergencyContactID, ente.RecoveryStatusRecovered, nil)
+	})
 
 	return resp, nil
 }
@@ -137,7 +140,9 @@ func (c *Controller) SendRecoveryReminder() {
 				continue
 			}
 
-			go c.sendRecoveryNotification(context.Background(), row.UserID, row.EmergencyContactID, ente.RecoveryStatusReady, nil)
+			workerjobs.Background(func() {
+				c.sendRecoveryNotification(context.Background(), row.UserID, row.EmergencyContactID, ente.RecoveryStatusReady, nil)
+			})
 		} else if daysLeft >= 2 && row.Status == ente.RecoveryStatusWaiting {
 			var (
 				nextReminder int64
@@ -162,7 +167,9 @@ func (c *Controller) SendRecoveryReminder() {
 			}
 
 			if row.Status == ente.RecoveryStatusWaiting {
-				go c.sendRecoveryNotification(context.Background(), row.UserID, row.EmergencyContactID, ente.RecoveryStatusWaiting, &daysLeft)
+				workerjobs.Background(func() {
+					c.sendRecoveryNotification(context.Background(), row.UserID, row.EmergencyContactID, ente.RecoveryStatusWaiting, &daysLeft)
+				})
 			} else {
 				logger.Warnf("No need to send email with status %v", row.Status)
 			}

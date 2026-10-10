@@ -6,8 +6,8 @@ import (
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/internal/testutil"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/s3config"
-	"github.com/lib/pq"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
@@ -73,8 +73,11 @@ func TestUpdateFileReplicaLocations(t *testing.T) {
 				file.Info.ThumbnailSize = 20
 				usageDiff = 110
 				stagedObjects = []string{file.File.ObjectKey, file.Thumbnail.ObjectKey}
-				_, err := db.Exec(`INSERT INTO temp_objects (object_key, expiration_time)
-					SELECT unnest($1::text[]), 1`, pq.Array(stagedObjects))
+				_, err := db.Exec(database.SQL(db,
+					`INSERT INTO temp_objects (object_key, expiration_time)
+					SELECT unnest($1::text[]), 1`, `INSERT INTO temp_objects (object_key, expiration_time)
+					SELECT value, 1 FROM json_each($1)`), database.Array(db,
+					stagedObjects))
 				require.NoError(t, err)
 				fileLocations = []string{s3Config.GetHotDataCenter()}
 				thumbnailLocations = fileLocations

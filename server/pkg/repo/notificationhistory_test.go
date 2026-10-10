@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/ente/museum/internal/testutil"
-	"github.com/lib/pq"
+	"github.com/ente/museum/pkg/utils/database"
 )
 
 func TestGrantStorageWarningLoginGraceClearsTerminalRowsAndInsertsGrace(t *testing.T) {
@@ -34,13 +34,15 @@ func TestGrantStorageWarningLoginGraceClearsTerminalRowsAndInsertsGrace(t *testi
 	}
 
 	var terminalRows int
-	if err := db.QueryRow(
+	if err := db.QueryRow(database.SQL(db,
 		`SELECT count(*)
 		   FROM notification_history
 		  WHERE user_id = $1
-		    AND template_id = ANY($2)`,
-		userID,
-		pq.Array(StorageWarningScheduledDeletionTemplateIDs()),
+		    AND template_id = ANY($2)`, `SELECT count(*)
+		   FROM notification_history
+		  WHERE user_id = $1
+		    AND template_id IN (SELECT value FROM json_each($2))`), userID, database.Array(db,
+		StorageWarningScheduledDeletionTemplateIDs()),
 	).Scan(&terminalRows); err != nil {
 		t.Fatalf("failed to count terminal rows: %v", err)
 	}

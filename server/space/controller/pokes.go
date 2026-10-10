@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"strings"
 
 	"github.com/ente/museum/ente"
@@ -42,7 +43,7 @@ func (c *PokesController) Create(ctx context.Context, sender *repo.SpaceRecord, 
 		return err
 	}
 	if created {
-		go c.ActivityNotifier.OnSpacePokeSent(spaceActivityActor(sender), recipient.OwnerID)
+		workerjobs.Background(func() { c.ActivityNotifier.OnSpacePokeSent(spaceActivityActor(sender), recipient.OwnerID) })
 	}
 	return nil
 }

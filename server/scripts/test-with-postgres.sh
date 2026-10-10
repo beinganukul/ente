@@ -39,7 +39,7 @@ if [ "$mode" = docker ]; then
         [ "$i" -lt 30 ] || { echo "Postgres not ready after 30s." >&2; exit 1; }
         sleep 1
     done
-    export PGHOST=localhost PGPORT="$port" PGUSER=postgres PGPASSWORD=test_pass
+    export PGHOST=127.0.0.1 PGPORT="$port" PGUSER=postgres PGPASSWORD=test_pass
 else
     [ -z "${PGHOST:-}${PGHOSTADDR:-}${PGPORT:-}${PGSERVICE:-}${PGSERVICEFILE:-}" ] || {
         echo "host mode always uses the default local Postgres; unset PG* env." >&2

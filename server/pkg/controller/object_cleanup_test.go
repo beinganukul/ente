@@ -13,6 +13,7 @@ import (
 	"github.com/ente/museum/internal/testutil"
 	"github.com/ente/museum/pkg/repo"
 	"github.com/ente/museum/pkg/utils/config"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/s3config"
 	"github.com/spf13/viper"
 )
@@ -103,13 +104,26 @@ func TestFileRegistrationRollsBackWhenCleanupWins(t *testing.T) {
 		), 100, 10, 110, ownerID, ente.Photos)
 		registrationDone <- err
 	}()
-	waitForTempObjectDeleteLock(t, db)
+	if database.IsTurso(db) {
+		select {
+		case err := <-registrationDone:
+			registrationDone <- err
+		case <-time.After(2 * time.Second):
+			t.Fatal("registration did not reject the committed cleanup claim")
+		}
+	} else {
+		waitForTempObjectDeleteLock(t, db)
+	}
 	release()
 
+	wantRemoved, wantRemaining := 2, 0
+	if database.IsTurso(db) {
+		wantRemoved, wantRemaining = 1, 1
+	}
 	select {
 	case count := <-cleanupDone:
-		if count != 2 {
-			t.Fatalf("cleanup removed %d objects, want 2", count)
+		if count != wantRemoved {
+			t.Fatalf("cleanup removed %d objects, want %d", count, wantRemoved)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("cleanup did not finish")
@@ -134,7 +148,7 @@ func TestFileRegistrationRollsBackWhenCleanupWins(t *testing.T) {
 	).Scan(&files, &objectKeys, &collectionFiles, &tempObjects); err != nil {
 		t.Fatalf("failed to read registration state: %v", err)
 	}
-	if files != 0 || objectKeys != 0 || collectionFiles != 0 || tempObjects != 0 {
+	if files != 0 || objectKeys != 0 || collectionFiles != 0 || tempObjects != wantRemaining {
 		t.Fatalf("unexpected registration state: files=%d object_keys=%d collection_files=%d temp_objects=%d",
 			files, objectKeys, collectionFiles, tempObjects)
 	}

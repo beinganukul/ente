@@ -6,6 +6,7 @@ import (
 	"github.com/ente/museum/internal/testutil"
 	"github.com/ente/museum/pkg/controller"
 	"github.com/ente/museum/pkg/repo"
+	"github.com/ente/museum/pkg/utils/database"
 )
 
 func TestCreateUserInitializesFileCounts(t *testing.T) {
@@ -49,15 +50,17 @@ func TestCreateUserRollsBackWhenSubscriptionCreationFails(t *testing.T) {
 		HashingKey:          testutil.HashingKey(),
 	}
 
-	_, err := db.Exec(`ALTER TABLE subscriptions
+	_, err := db.Exec(database.SQL(db, `ALTER TABLE subscriptions
 		ADD CONSTRAINT reject_free_subscription_for_atomicity_test
-		CHECK (false)`)
+		CHECK (false)`, `CREATE TRIGGER reject_free_subscription_for_atomicity_test
+		BEFORE INSERT ON subscriptions BEGIN SELECT RAISE(ABORT, 'subscription atomicity test'); END;`))
 	if err != nil {
 		t.Fatalf("failed to install subscription failure constraint: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := db.Exec(`ALTER TABLE subscriptions
-			DROP CONSTRAINT reject_free_subscription_for_atomicity_test`); err != nil {
+		if _, err := db.Exec(database.SQL(db, `ALTER TABLE subscriptions
+			DROP CONSTRAINT reject_free_subscription_for_atomicity_test`,
+			`DROP TRIGGER reject_free_subscription_for_atomicity_test`)); err != nil {
 			t.Errorf("failed to remove subscription failure constraint: %v", err)
 		}
 	})

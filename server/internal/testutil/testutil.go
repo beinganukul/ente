@@ -1,8 +1,12 @@
 package testutil
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/database"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -67,6 +71,25 @@ func RequireTestDB(t *testing.T) *sql.DB {
 	}
 
 	testDBInitOnce.Do(func() {
+		if testURL := os.Getenv("ENTE_TEST_TURSO_URL"); testURL != "" {
+			u, err := url.Parse(testURL)
+			if err != nil {
+				testDBErr = err
+				return
+			}
+			ip := net.ParseIP(u.Hostname())
+			if u.Scheme != "http" || !(u.Hostname() == "localhost" || ip != nil && ip.IsLoopback()) {
+				testDBErr = fmt.Errorf("turso tests require a disposable loopback HTTP server")
+				return
+			}
+			cfg := database.Config{Provider: database.Turso, TursoURL: testURL}
+			testDB, testDBErr = database.Open(context.Background(), cfg)
+			if testDBErr != nil {
+				return
+			}
+			testDBErr = database.Migrate(context.Background(), cfg, filepath.Join(serverRootPath(), "migrations"))
+			return
+		}
 		testDBName, err := expectedTestDBName()
 		if err != nil {
 			testDBErr = err
@@ -92,7 +115,7 @@ func RequireTestDB(t *testing.T) *sql.DB {
 		}
 
 		migrationPath := "file://" + filepath.Join(serverRootPath())
-		migrationPath = migrationPath + "/migrations"
+		migrationPath = migrationPath + "/migrations/postgres"
 		mig, err := migrate.NewWithDatabaseInstance(migrationPath, testDBName, driver)
 		if err != nil {
 			testDBErr = err
@@ -115,8 +138,51 @@ func ResetTables(t *testing.T, db *sql.DB) {
 	if err := verifySafeTestDB(db); err != nil {
 		t.Fatalf("refusing to reset tables on unsafe database connection: %v", err)
 	}
+	if database.IsTurso(db) {
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if _, err = conn.ExecContext(context.Background(), "PRAGMA foreign_keys=OFF"); err != nil {
+			t.Fatal(err)
+		}
+		defer conn.ExecContext(context.Background(), "PRAGMA foreign_keys=ON")
+		rows, err := conn.QueryContext(context.Background(), "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('schema_migrations','database_migration_lock','museum_migration_lock','db_probe_migrations')")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for rows.Next() {
+			var name string
+			if err = rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			names = append(names, name)
+		}
+		if err = rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := conn.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		for _, name := range names {
+			if _, err = tx.Exec(`DELETE FROM "` + strings.ReplaceAll(name, `"`, `""`) + `"`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err = tx.Exec("DELETE FROM sqlite_sequence; INSERT INTO sqlite_sequence(name,seq) VALUES ('users',1580559962386437),('collections',1580559962386437),('files',9999999)"); err != nil {
+			t.Fatal(err)
+		}
+		if err = tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	_, err := db.Exec(`
-		TRUNCATE TABLE
+ TRUNCATE TABLE
 			notification_history,
 			events,
 			task_lock,
@@ -143,6 +209,17 @@ func ResetTables(t *testing.T, db *sql.DB) {
 }
 
 func verifySafeTestDB(db *sql.DB) error {
+	if database.IsTurso(db) {
+		u, err := url.Parse(os.Getenv("ENTE_TEST_TURSO_URL"))
+		if err != nil {
+			return err
+		}
+		ip := net.ParseIP(u.Hostname())
+		if u.Scheme != "http" || !(u.Hostname() == "localhost" || ip != nil && ip.IsLoopback()) {
+			return fmt.Errorf("refusing to reset non-loopback Turso database")
+		}
+		return nil
+	}
 	expectedDBName, err := expectedTestDBName()
 	if err != nil {
 		return err
@@ -219,9 +296,7 @@ func InsertUser(t *testing.T, db *sql.DB, fixture UserFixture) int64 {
 
 	if fixture.UserID > 0 {
 		_, err = db.Exec(
-			`INSERT INTO users(user_id, encrypted_email, email_decryption_nonce, email_hash, creation_time, family_admin_id)
-			 OVERRIDING SYSTEM VALUE
-			 VALUES($1, $2, $3, $4, $5, $6)`,
+			database.SQL(db, `INSERT INTO users(user_id, encrypted_email, email_decryption_nonce, email_hash, creation_time, family_admin_id) OVERRIDING SYSTEM VALUE VALUES($1,$2,$3,$4,$5,$6)`, `INSERT INTO users(user_id, encrypted_email, email_decryption_nonce, email_hash, creation_time, family_admin_id) VALUES($1,$2,$3,$4,$5,$6)`),
 			fixture.UserID,
 			encryptedEmail.Cipher,
 			encryptedEmail.Nonce,
@@ -283,7 +358,7 @@ func InsertSubscription(t *testing.T, db *sql.DB, fixture SubscriptionFixture) {
 
 	_, err := db.Exec(
 		`INSERT INTO subscriptions(user_id, storage, original_transaction_id, expiry_time, product_id, payment_provider, latest_verification_data, attributes)
-		 VALUES($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8)`,
 		fixture.UserID,
 		fixture.Storage,
 		fixture.OriginalTransactionID,

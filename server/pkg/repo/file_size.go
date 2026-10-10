@@ -7,13 +7,15 @@ import (
 	"slices"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 	log "github.com/sirupsen/logrus"
 )
 
 func (repo *FileRepository) GetFilesInfo(ctx context.Context, fileIDs []int64, userID int64) (map[int64]*ente.FileInfo, error) {
-	rows, err := repo.DB.QueryContext(ctx, `SELECT file_id, info from files where file_id = ANY($1) and owner_id = $2`, pq.Array(fileIDs), userID)
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT file_id, info from files where file_id = ANY($1) and owner_id = $2`, `SELECT file_id, info from files where file_id IN (SELECT value FROM json_each($1)) and owner_id = $2`), database.Array(repo.DB,
+		fileIDs), userID)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -49,7 +51,9 @@ func (repo *FileRepository) UpdateSizeInfo(ctx context.Context, sizeInfo map[int
 }
 
 func (repo *FileRepository) GetFileInfoFromObjectKeys(ctx context.Context, fileIDs []int64) (map[int64]*ente.FileInfo, error) {
-	rows, err := repo.DB.QueryContext(ctx, `SELECT file_id, size, o_type FROM object_keys WHERE file_id = ANY($1)`, pq.Array(fileIDs))
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT file_id, size, o_type FROM object_keys WHERE file_id = ANY($1)`, `SELECT file_id, size, o_type FROM object_keys WHERE file_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}

@@ -5,8 +5,8 @@ import (
 	"database/sql"
 
 	socialentity "github.com/ente/museum/ente/social"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type AnonUsersRepository struct {
@@ -84,12 +84,19 @@ func (r *AnonUsersRepository) LatestUpdateByCollection(ctx context.Context, coll
 	if len(collectionIDs) == 0 {
 		return results, nil
 	}
-	rows, err := r.DB.QueryContext(ctx, `
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB,
+		`
         SELECT collection_id, MAX(updated_at)
         FROM anon_users
         WHERE collection_id = ANY($1)
         GROUP BY collection_id
-    `, pq.Array(collectionIDs))
+    `, `
+        SELECT collection_id, MAX(updated_at)
+        FROM anon_users
+        WHERE collection_id IN (SELECT value FROM json_each($1))
+        GROUP BY collection_id
+`), database.Array(r.DB,
+		collectionIDs))
 	if err != nil {
 		return results, stacktrace.Propagate(err, "")
 	}

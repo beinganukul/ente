@@ -1,12 +1,63 @@
 package filedata
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/ente/museum/ente"
 	enteFileData "github.com/ente/museum/ente/filedata"
 	"github.com/ente/museum/internal/testutil"
+	"github.com/ente/museum/pkg/repo"
+	"github.com/ente/museum/pkg/utils/database"
+	"github.com/stretchr/testify/require"
 )
+
+func TestOverwriteRetainsOnlyStaleDeletionBuckets(t *testing.T) {
+	testutil.WithServerRoot(t)
+	db := testutil.RequireTestDB(t)
+	for _, preview := range []bool{false, true} {
+		for _, latest := range []string{"b2-eu-cen", "b5"} {
+			t.Run(fmt.Sprintf("preview=%t/latest=%s", preview, latest), func(t *testing.T) {
+				testutil.ResetTables(t, db)
+				t.Cleanup(func() { testutil.ResetTables(t, db) })
+				r := &Repository{DB: db, ObjectCleanupRepo: &repo.ObjectCleanupRepository{DB: db}}
+				typeOfData := ente.MlData
+				if preview {
+					typeOfData = ente.PreviewVideo
+				}
+				_, err := db.Exec(`INSERT INTO file_data(file_id,user_id,data_type,size,latest_bucket,replicated_buckets,delete_from_buckets)
+					VALUES(1,10,$1,11,'b2-eu-cen',$2,$3)`, string(typeOfData), database.Array(db, []string{"b5"}), database.Array(db, []string{"b6"}))
+				require.NoError(t, err)
+				objectID, objectSize := "new-preview", int64(12)
+				row := enteFileData.Row{FileID: 1, UserID: 10, Type: typeOfData, Size: 42, LatestBucket: latest, ObjectID: &objectID, ObjectSize: &objectSize}
+				if preview {
+					require.NoError(t, r.ObjectCleanupRepo.AddTempObject(ente.TempObject{ObjectKey: objectID, BucketId: latest}, 42))
+					require.NoError(t, r.InsertOrUpdatePreviewData(t.Context(), row, objectID))
+					var staged int
+					require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM temp_objects WHERE object_key=$1`, objectID).Scan(&staged))
+					require.Zero(t, staged)
+				} else {
+					require.NoError(t, r.InsertOrUpdate(t.Context(), row))
+				}
+				actual, err := r.GetFileData(t.Context(), 1)
+				require.NoError(t, err)
+				require.Len(t, actual, 1)
+				require.Equal(t, int64(42), actual[0].Size)
+				require.Equal(t, latest, actual[0].LatestBucket)
+				require.Empty(t, actual[0].ReplicatedBuckets)
+				require.True(t, actual[0].PendingSync)
+				stale := "b5"
+				if latest == "b5" {
+					stale = "b2-eu-cen"
+				}
+				require.ElementsMatch(t, []string{stale, "b6"}, actual[0].DeleteFromBuckets)
+				if preview {
+					require.Equal(t, &objectID, actual[0].ObjectID)
+				}
+			})
+		}
+	}
+}
 
 func TestInsertOrUpdatePreviewDataRequiresObjectID(t *testing.T) {
 	if err := (&Repository{}).InsertOrUpdatePreviewData(t.Context(), enteFileData.Row{}, ""); err == nil {

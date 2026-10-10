@@ -9,9 +9,9 @@ import (
 	"github.com/ente/stacktrace"
 
 	"github.com/awa/go-iap/appstore"
-	"github.com/awa/go-iap/playstore"
 	"github.com/ente/museum/ente"
-	"google.golang.org/api/androidpublisher/v3"
+	"github.com/ente/museum/pkg/utils/database"
+	"github.com/ente/museum/pkg/utils/playstore"
 )
 
 type BillingRepository struct {
@@ -34,7 +34,8 @@ func (repo *BillingRepository) UpdateSubscriptionExpiryTime(subscriptionID int64
 }
 
 func (repo *BillingRepository) UpdateSubscriptionCancellationStatus(userID int64, status bool) error {
-	_, err := repo.DB.Exec(`UPDATE subscriptions SET attributes = jsonb_set(attributes, '{isCancelled}', $1::jsonb) WHERE user_id = $2`, status, userID)
+	_, err := repo.DB.Exec(database.SQL(repo.DB,
+		`UPDATE subscriptions SET attributes = jsonb_set(attributes, '{isCancelled}', $1::jsonb) WHERE user_id = $2`, `UPDATE subscriptions SET attributes = json_set(attributes, '$.isCancelled', json(CASE WHEN $1 THEN 'true' ELSE 'false' END)) WHERE user_id = $2`), status, userID)
 	return stacktrace.Propagate(err, "")
 }
 
@@ -82,7 +83,7 @@ func (repo *BillingRepository) UpdateSubscription(
 	return stacktrace.Propagate(err, "")
 }
 
-func (repo *BillingRepository) LogPlayStorePush(userID int64, notification playstore.DeveloperNotification, verificationResponse androidpublisher.SubscriptionPurchase) error {
+func (repo *BillingRepository) LogPlayStorePush(userID int64, notification playstore.DeveloperNotification, verificationResponse playstore.SubscriptionPurchase) error {
 	notificationJSON, _ := json.Marshal(notification)
 	responseJSON, _ := json.Marshal(verificationResponse)
 	_, err := repo.DB.Exec(`INSERT INTO subscription_logs(user_id, payment_provider, notification, verification_response) VALUES($1, $2, $3, $4)`,
@@ -145,7 +146,7 @@ func (repo *BillingRepository) LogStripePush(eventLog ente.StripeEventLog) error
 
 func (repo *BillingRepository) LogAdminTriggeredSubscriptionUpdate(r ente.UpdateSubscriptionRequest) error {
 	requestJSON, _ := json.Marshal(r)
-	_, err := repo.DB.Exec(`INSERT INTO subscription_logs(user_id, payment_provider, notification, verification_response) VALUES($1, $2, $3, '{}'::json)`,
-		r.UserID, r.PaymentProvider, requestJSON)
+	_, err := repo.DB.Exec(database.SQL(repo.DB,
+		`INSERT INTO subscription_logs(user_id, payment_provider, notification, verification_response) VALUES($1, $2, $3, '{}'::json)`, `INSERT INTO subscription_logs(user_id, payment_provider, notification, verification_response) VALUES($1, $2, $3, '{}')`), r.UserID, r.PaymentProvider, requestJSON)
 	return stacktrace.Propagate(err, "")
 }

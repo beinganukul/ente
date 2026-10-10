@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/ente/museum/pkg/controller"
 	"github.com/ente/museum/pkg/controller/lock"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/pkg/controller/user"
@@ -42,9 +43,9 @@ func (c *Controller) UpdateContact(ctx *gin.Context,
 			status = ente.RecoveryStatusRejected
 		}
 		for range cancelled {
-			go c.sendRecoveryNotification(ctx, req.UserID, req.EmergencyContactID, status, nil)
+			workerjobs.Background(func() { c.sendRecoveryNotification(ctx, req.UserID, req.EmergencyContactID, status, nil) })
 		}
-		go c.sendContactNotification(ctx, req.UserID, req.EmergencyContactID, req.State)
+		workerjobs.Background(func() { c.sendContactNotification(ctx, req.UserID, req.EmergencyContactID, req.State) })
 	}
 	return nil
 }

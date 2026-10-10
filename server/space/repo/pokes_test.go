@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,9 +26,11 @@ func TestPokesCreateDuringShareChanges(t *testing.T) {
 			require.NoError(t, err)
 			defer tx.Rollback()
 			var pid int
-			require.NoError(t, tx.QueryRowContext(ctx, `
+			if !database.IsTurso(module.Spaces.DB) {
+				require.NoError(t, tx.QueryRowContext(ctx, `
 				SELECT pg_backend_pid() FROM spaces WHERE space_id = $1 FOR UPDATE
 			`, space.SpaceID).Scan(&pid))
+			}
 			result := make(chan error, 1)
 			go func() {
 				defer close(result)
@@ -39,18 +42,26 @@ func TestPokesCreateDuringShareChanges(t *testing.T) {
 				for range result {
 				}
 			})
-			for {
-				var waiting bool
-				require.NoError(t, module.Spaces.DB.QueryRowContext(ctx, `
+			if database.IsTurso(module.Spaces.DB) {
+				select {
+				case err := <-result:
+					t.Fatalf("operation escaped writer lock: %v", err)
+				case <-time.After(50 * time.Millisecond):
+				}
+			} else {
+				for {
+					var waiting bool
+					require.NoError(t, module.Spaces.DB.QueryRowContext(ctx, `
 					SELECT EXISTS (
 						SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
 						AND $1 = ANY(pg_blocking_pids(pid))
 					)
 				`, pid).Scan(&waiting))
-				if waiting {
-					break
+					if waiting {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
 				}
-				time.Sleep(10 * time.Millisecond)
 			}
 			if operation == "update-recipient-shares" {
 				_, err = tx.ExecContext(ctx, `
@@ -58,7 +69,7 @@ func TestPokesCreateDuringShareChanges(t *testing.T) {
 					WHERE space_id = $1 AND friend_space_id = $2
 				`, alice.SpaceID, bob.SpaceID, testSpaceBytes("updated-share"), 1)
 			} else {
-				err = resetSpaceAccessTx(ctx, tx, space.OwnerID, []string{space.SpaceID})
+				err = resetSpaceAccessTx(ctx, module.Spaces.DB, tx, space.OwnerID, []string{space.SpaceID})
 			}
 			require.NoError(t, err)
 			require.NoError(t, tx.Commit())

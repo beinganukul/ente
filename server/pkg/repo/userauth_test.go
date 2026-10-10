@@ -12,9 +12,9 @@ import (
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/internal/testutil"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/time"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,6 +31,22 @@ func TestTokenHashTrigger(t *testing.T) {
 		CreationTime: 1,
 	})
 	rawToken := "existing-bearer-token-π"
+	if database.IsTurso(db) {
+		_, err := db.Exec(`INSERT INTO tokens(user_id,token,token_hash,creation_time,app) VALUES($1,$2,$3,1,$4)`, userID, rawToken, bytes.Repeat([]byte{0xff}, sha256.Size), ente.Photos)
+		require.ErrorContains(t, err, "application-computed token_hash")
+		h := sha256.Sum256([]byte(rawToken))
+		_, err = db.Exec(`INSERT INTO tokens(user_id,token_hash,creation_time,app) VALUES($1,$2,1,$3)`, userID, h[:], ente.Photos)
+		require.NoError(t, err)
+		var token sql.NullString
+		var stored []byte
+		require.NoError(t, db.QueryRow(`SELECT token,token_hash FROM tokens WHERE user_id=$1`, userID).Scan(&token, &stored))
+		require.False(t, token.Valid)
+		require.Equal(t, h[:], stored)
+		_, err = db.Exec(`UPDATE tokens SET token=$1 WHERE user_id=$2`, rawToken, userID)
+		require.ErrorContains(t, err, "application-computed token_hash")
+		return
+	}
+
 	var storedToken sql.NullString
 	var storedHash []byte
 	err := db.QueryRow(
@@ -92,11 +108,11 @@ func TestUserAuthRepositoryRemoveOTTReturnsWhetherRowWasConsumed(t *testing.T) {
 	testutil.WithServerRoot(t)
 
 	db := testutil.RequireTestDB(t)
-	if _, err := db.Exec(`TRUNCATE TABLE otts RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := db.Exec(database.SQL(db, `TRUNCATE TABLE otts RESTART IDENTITY CASCADE`, `DELETE FROM otts`)); err != nil {
 		t.Fatalf("failed to reset otts: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := db.Exec(`TRUNCATE TABLE otts RESTART IDENTITY CASCADE`); err != nil {
+		if _, err := db.Exec(database.SQL(db, `TRUNCATE TABLE otts RESTART IDENTITY CASCADE`, `DELETE FROM otts`)); err != nil {
 			t.Errorf("failed to reset otts: %v", err)
 		}
 	})
@@ -247,11 +263,11 @@ func TestPasswordUpdateRollsBackRecoveryAuthorization(t *testing.T) {
 
 	var unchanged bool
 	require.NoError(t, db.QueryRow(`SELECT
-		EXISTS (SELECT FROM srp_auth WHERE user_id=$1 AND srp_user_id=$2 AND salt='old-srp-salt' AND verifier='old-verifier') AND
-		EXISTS (SELECT FROM key_attributes WHERE user_id=$1 AND kek_salt='old-salt' AND encrypted_key='old-key' AND key_decryption_nonce='old-nonce' AND mem_limit=1 AND ops_limit=1) AND
-		EXISTS (SELECT FROM tokens WHERE user_id=$1 AND token_hash=$3 AND is_deleted=FALSE) AND
-		EXISTS (SELECT FROM emergency_recovery WHERE id=$4 AND status=$5) AND
-		EXISTS (SELECT FROM space_browser_sessions WHERE token_hash=$6 AND user_id=$1)`,
+		EXISTS (SELECT 1 FROM srp_auth WHERE user_id=$1 AND srp_user_id=$2 AND salt='old-srp-salt' AND verifier='old-verifier') AND
+		EXISTS (SELECT 1 FROM key_attributes WHERE user_id=$1 AND kek_salt='old-salt' AND encrypted_key='old-key' AND key_decryption_nonce='old-nonce' AND mem_limit=1 AND ops_limit=1) AND
+		EXISTS (SELECT 1 FROM tokens WHERE user_id=$1 AND token_hash=$3 AND is_deleted=FALSE) AND
+		EXISTS (SELECT 1 FROM emergency_recovery WHERE id=$4 AND status=$5) AND
+		EXISTS (SELECT 1 FROM space_browser_sessions WHERE token_hash=$6 AND user_id=$1)`,
 		userID, oldSRPUserID, tokenHash[:], recoveryID, ente.RecoveryStatusReady, browserTokenHash).Scan(&unchanged))
 	require.True(t, unchanged)
 }
@@ -308,8 +324,9 @@ func TestPushTokensRemovedOnSessionRevocation(t *testing.T) {
 				require.NoError(t, db.QueryRow(`SELECT is_deleted FROM tokens WHERE token_hash = $1`, session.TokenHash).Scan(&deleted))
 				require.True(t, deleted)
 			}
-			var remaining pq.StringArray
-			require.NoError(t, db.QueryRow(`SELECT ARRAY(SELECT fcm_token FROM push_tokens)`).Scan(&remaining))
+			var remaining []string
+			require.NoError(t, db.QueryRow(database.SQL(db,
+				`SELECT ARRAY(SELECT fcm_token FROM push_tokens)`, `SELECT json_group_array(fcm_token) FROM push_tokens`)).Scan(database.Array(db, &remaining)))
 			require.ElementsMatch(t, tc.remaining, []string(remaining))
 		})
 	}
@@ -326,14 +343,14 @@ func TestPushTokenCleanupFailureRollsBackSessionRevocation(t *testing.T) {
 	hash := sha256.Sum256([]byte("session"))
 	_, err := db.Exec(`INSERT INTO push_tokens(user_id, fcm_token, session_token_hash) VALUES($1, 'device', $2)`, userID, hash[:])
 	require.NoError(t, err)
-	_, err = db.Exec(`CREATE FUNCTION fail_push_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$
+	_, err = db.Exec(database.SQL(db, `CREATE FUNCTION fail_push_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$
 		BEGIN RAISE EXCEPTION 'push cleanup failed'; END;
 		$$;
 		CREATE TRIGGER fail_push_cleanup BEFORE DELETE ON push_tokens
-		FOR EACH ROW EXECUTE FUNCTION fail_push_cleanup()`)
+		FOR EACH ROW EXECUTE FUNCTION fail_push_cleanup()`, `CREATE TRIGGER fail_push_cleanup BEFORE DELETE ON push_tokens BEGIN SELECT RAISE(ABORT,'push cleanup failed'); END;`))
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, err := db.Exec(`DROP TRIGGER fail_push_cleanup ON push_tokens; DROP FUNCTION fail_push_cleanup()`)
+		_, err := db.Exec(database.SQL(db, `DROP TRIGGER fail_push_cleanup ON push_tokens; DROP FUNCTION fail_push_cleanup()`, `DROP TRIGGER fail_push_cleanup`))
 		require.NoError(t, err)
 	})
 	_, err = r.RemoveTokenByHash(userID, hash[:])
@@ -359,22 +376,38 @@ func TestSessionRevocationDeletesConcurrentPushRegistration(t *testing.T) {
 	require.NoError(t, err)
 	defer registration.Rollback()
 	var sessionUserID int64
-	require.NoError(t, registration.QueryRow(`SELECT user_id FROM tokens WHERE token_hash = $1 FOR SHARE`, hash[:]).Scan(&sessionUserID))
+	require.NoError(t, registration.QueryRow(database.SQL(db,
+		`SELECT user_id FROM tokens WHERE token_hash = $1 FOR SHARE`, `SELECT user_id FROM tokens WHERE token_hash = $1`), hash[:]).Scan(&sessionUserID))
 	_, err = registration.Exec(`INSERT INTO push_tokens(user_id, fcm_token, session_token_hash) VALUES($1, 'device', $2)`, userID, hash[:])
 	require.NoError(t, err)
 	var pid int
-	require.NoError(t, registration.QueryRow(`SELECT pg_backend_pid()`).Scan(&pid))
+	require.NoError(t, registration.QueryRow(database.SQL(db, `SELECT pg_backend_pid()`, `SELECT 0`)).Scan(&pid))
 	done := make(chan error, 1)
 	go func() {
 		_, err := r.RemoveTokenByHash(userID, hash[:])
 		done <- err
 	}()
-	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		var blocked bool
-		require.NoError(collect, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+	if database.IsTurso(db) {
+		require.Eventually(t, func() bool {
+			select {
+			case err := <-done:
+				t.Fatalf("revocation finished before releasing registration transaction: %v; pool=%+v", err, db.Stats())
+			default:
+			}
+			return database.WaitingTransactions(db) > 0
+		}, 2*gotime.Second, gotime.Millisecond)
+	} else {
+		require.EventuallyWithT(t, func(collect *assert.CollectT) {
+			var blocked bool
+			if database.IsTurso(db) {
+				blocked = database.WaitingTransactions(db) > 0
+			} else {
+				require.NoError(collect, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
 			WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))`, pid).Scan(&blocked))
-		require.True(collect, blocked)
-	}, 5*gotime.Second, 10*gotime.Millisecond)
+			}
+			require.True(collect, blocked)
+		}, 5*gotime.Second, 10*gotime.Millisecond)
+	}
 	require.NoError(t, registration.Commit())
 	select {
 	case err := <-done:

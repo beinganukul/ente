@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/database"
 	"os"
 	"testing"
 	"time"
@@ -17,13 +18,16 @@ import (
 func TestPushTokenRegistrationMigration(t *testing.T) {
 	testutil.WithServerRoot(t)
 	db := testutil.RequireTestDB(t)
+	if database.IsTurso(db) {
+		t.Skip("PostgreSQL historical migration; SQLite baseline validated by database schema parity tests")
+	}
 	tx, err := db.Begin()
 	require.NoError(t, err)
 	defer tx.Rollback()
 	_, err = tx.Exec(`CREATE TEMP TABLE push_tokens (fcm_token TEXT, apns_token TEXT) ON COMMIT DROP;
 		INSERT INTO push_tokens VALUES ('with-apns', 'apns'), ('without-apns', '');`)
 	require.NoError(t, err)
-	up, err := os.ReadFile("migrations/149_push_token_registration.up.sql")
+	up, err := os.ReadFile("migrations/postgres/149_push_token_registration.up.sql")
 	require.NoError(t, err)
 	_, err = tx.Exec(string(up))
 	require.NoError(t, err)
@@ -32,7 +36,7 @@ func TestPushTokenRegistrationMigration(t *testing.T) {
 	var count int
 	require.NoError(t, tx.QueryRow(`SELECT count(*) FROM push_tokens WHERE session_token_hash IS NULL`).Scan(&count))
 	require.Equal(t, 3, count)
-	down, err := os.ReadFile("migrations/149_push_token_registration.down.sql")
+	down, err := os.ReadFile("migrations/postgres/149_push_token_registration.down.sql")
 	require.NoError(t, err)
 	_, err = tx.Exec(string(down))
 	require.NoError(t, err)
@@ -130,7 +134,7 @@ func TestPushRegistrationWaitsForSessionRevocation(t *testing.T) {
 	_, err = revocation.Exec(`UPDATE tokens SET is_deleted = true WHERE token_hash = $1`, hash[:])
 	require.NoError(t, err)
 	var pid int
-	require.NoError(t, revocation.QueryRow(`SELECT pg_backend_pid()`).Scan(&pid))
+	require.NoError(t, revocation.QueryRow(database.SQL(db, `SELECT pg_backend_pid()`, `SELECT 0`)).Scan(&pid))
 	platform := "ios"
 	done := make(chan error, 1)
 	go func() {
@@ -138,8 +142,12 @@ func TestPushRegistrationWaitsForSessionRevocation(t *testing.T) {
 	}()
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		var blocked bool
-		require.NoError(collect, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+		if database.IsTurso(db) {
+			blocked = database.WaitingTransactions(db) > 0
+		} else {
+			require.NoError(collect, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
 			WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))`, pid).Scan(&blocked))
+		}
 		require.True(collect, blocked)
 	}, 5*time.Second, 10*time.Millisecond)
 	require.NoError(t, revocation.Commit())
@@ -157,13 +165,16 @@ func TestPushRegistrationWaitsForSessionRevocation(t *testing.T) {
 func TestPushPlatformRegistrationMigration(t *testing.T) {
 	testutil.WithServerRoot(t)
 	db := testutil.RequireTestDB(t)
+	if database.IsTurso(db) {
+		t.Skip("PostgreSQL historical migration; SQLite baseline validated by database schema parity tests")
+	}
 	tx, err := db.Begin()
 	require.NoError(t, err)
 	defer tx.Rollback()
 	_, err = tx.Exec(`CREATE TEMP TABLE push_tokens (fcm_token TEXT) ON COMMIT DROP;
 		INSERT INTO push_tokens VALUES ('legacy')`)
 	require.NoError(t, err)
-	up, err := os.ReadFile("migrations/151_push_notification_registration.up.sql")
+	up, err := os.ReadFile("migrations/postgres/151_push_notification_registration.up.sql")
 	require.NoError(t, err)
 	_, err = tx.Exec(string(up))
 	require.NoError(t, err)
@@ -172,7 +183,7 @@ func TestPushPlatformRegistrationMigration(t *testing.T) {
 	var count int
 	require.NoError(t, tx.QueryRow(`SELECT count(*) FROM push_tokens WHERE platform='ios'`).Scan(&count))
 	require.Equal(t, 2, count)
-	down, err := os.ReadFile("migrations/151_push_notification_registration.down.sql")
+	down, err := os.ReadFile("migrations/postgres/151_push_notification_registration.down.sql")
 	require.NoError(t, err)
 	_, err = tx.Exec(string(down))
 	require.NoError(t, err)

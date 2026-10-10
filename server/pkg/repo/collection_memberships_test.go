@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/internal/testutil"
 	"github.com/ente/museum/pkg/repo/public"
+	"github.com/ente/museum/pkg/utils/database"
 )
 
 func TestAddFilesUpsertsBatchAndPreservesConflictFields(t *testing.T) {
@@ -316,7 +318,7 @@ func TestRestoreFilesPreservesMembershipBeforeCollectionLockOrder(t *testing.T) 
 	}
 	defer suggestion.Rollback()
 	var suggestionPID int
-	if err := suggestion.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&suggestionPID); err != nil {
+	if err := suggestion.QueryRowContext(ctx, database.SQL(db, `SELECT pg_backend_pid()`, `SELECT 0`)).Scan(&suggestionPID); err != nil {
 		t.Fatal(err)
 	}
 	// A SuggestAction request can pass validation before Trash, then update the
@@ -330,18 +332,22 @@ func TestRestoreFilesPreservesMembershipBeforeCollectionLockOrder(t *testing.T) 
 		restoreResult <- repository.RestoreFiles(ctx, ownerID, collectionID,
 			[]ente.CollectionFileItem{collectionMembershipTestItem(fileID)})
 	}()
-	for {
-		var waiting bool
-		if err := db.QueryRowContext(ctx, `SELECT EXISTS (
+	if database.IsTurso(db) {
+		require.Eventually(t, func() bool { return database.WaitingTransactions(db) > 0 }, 2*time.Second, time.Millisecond)
+	} else {
+		for {
+			var waiting bool
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS (
 			SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
 			AND $1 = ANY(pg_blocking_pids(pid))
 		)`, suggestionPID).Scan(&waiting); err != nil {
-			t.Fatal(err)
+				t.Fatal(err)
+			}
+			if waiting {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		if waiting {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	// Restore is waiting for our membership row. Taking the collection lock
 	// must succeed, allowing SuggestAction to finish and unblock Restore.
@@ -577,7 +583,8 @@ func collectionMembershipTestItem(fileID int64) ente.CollectionFileItem {
 func insertCollectionMembershipTestFiles(t *testing.T, db *sql.DB, ownerID int64, count int) []int64 {
 	t.Helper()
 
-	rows, err := db.Query(`INSERT INTO files(
+	rows, err := db.Query(database.SQL(db,
+		`INSERT INTO files(
 			owner_id,
 			file_decryption_header,
 			thumbnail_decryption_header,
@@ -595,7 +602,25 @@ func insertCollectionMembershipTestFiles(t *testing.T, db *sql.DB, ownerID int64
 			1,
 			'{}'::jsonb
 		FROM generate_series(1, $2) AS generated(sequence)
-		RETURNING file_id`, ownerID, count)
+		RETURNING file_id`, `WITH RECURSIVE generated(sequence) AS (SELECT 1 UNION ALL SELECT sequence+1 FROM generated WHERE sequence < $2) INSERT INTO files(
+			owner_id,
+			file_decryption_header,
+			thumbnail_decryption_header,
+			metadata_decryption_header,
+			encrypted_metadata,
+			updation_time,
+			info
+		)
+		SELECT
+			$1,
+			'file-header-' || generated.sequence,
+			'thumbnail-header-' || generated.sequence,
+			'metadata-header-' || generated.sequence,
+			'encrypted-metadata-' || generated.sequence,
+			1,
+			'{}'
+		FROM generated
+		RETURNING file_id`), ownerID, count)
 	if err != nil {
 		t.Fatalf("failed to insert %d files: %v", count, err)
 	}
@@ -621,6 +646,10 @@ func insertCollectionMembershipTestFiles(t *testing.T, db *sql.DB, ownerID int64
 func waitForFileLockWaiters(t *testing.T, db *sql.DB) {
 	t.Helper()
 
+	if database.IsTurso(db) {
+		require.Eventually(t, func() bool { return database.WaitingTransactions(db) >= 2 }, 2*time.Second, time.Millisecond)
+		return
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var count int
@@ -648,8 +677,10 @@ func runFileLockRace(t *testing.T, db *sql.DB, fileID int64, start func()) int64
 		t.Fatal(err)
 	}
 	defer blocker.Rollback()
-	if _, err := blocker.ExecContext(t.Context(), `SELECT file_id FROM files
-		WHERE file_id = $1 FOR UPDATE`, fileID); err != nil {
+	if _, err := blocker.ExecContext(t.Context(), database.SQL(db,
+		`SELECT file_id FROM files
+		WHERE file_id = $1 FOR UPDATE`, `SELECT file_id FROM files
+		WHERE file_id = $1`), fileID); err != nil {
 		t.Fatal(err)
 	}
 

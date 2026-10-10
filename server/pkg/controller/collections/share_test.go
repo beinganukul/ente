@@ -195,20 +195,29 @@ func addShareTestShare(
 
 func addShareTestOwnerFile(t *testing.T, db *sql.DB, collectionID, ownerID int64) int64 {
 	t.Helper()
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
 	var fileID int64
-	err := db.QueryRow(
-		`WITH inserted_file AS (
-			INSERT INTO files(owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, updation_time, info)
-			VALUES($1, 'file-header', 'thumbnail-header', 'metadata-header', 'encrypted-metadata', 1, '{}'::jsonb)
-			RETURNING file_id
-		)
-		INSERT INTO collection_files(collection_id, file_id, encrypted_key, key_decryption_nonce, updation_time, c_owner_id, f_owner_id)
-		SELECT $2, file_id, 'collection-file-key', 'collection-file-nonce', 1, $1, $1 FROM inserted_file
-		RETURNING file_id`,
+	err = tx.QueryRow(
+		`INSERT INTO files(owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, updation_time, info)
+		 VALUES($1, 'file-header', 'thumbnail-header', 'metadata-header', 'encrypted-metadata', 1, '{}')
+		 RETURNING file_id`,
 		ownerID,
-		collectionID,
 	).Scan(&fileID)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO collection_files(collection_id, file_id, encrypted_key, key_decryption_nonce, updation_time, c_owner_id, f_owner_id)
+		 VALUES($1, $2, 'collection-file-key', 'collection-file-nonce', 1, $3, $3)`,
+		collectionID, fileID, ownerID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	return fileID

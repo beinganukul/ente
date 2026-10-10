@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"os"
 
 	"github.com/ente/museum/pkg/controller/usercache"
@@ -99,12 +100,14 @@ func (c *OfferController) ApplyOffer(email string, productID string) error {
 		c.DiscordController.Notify("Error inserting bonus")
 		return stacktrace.Propagate(err, "")
 	}
-	go c.UserCacheCtrl.GetActiveStorageBonus(context.Background(), userID)
-	go emailUtil.SendTemplatedEmail([]string{email}, "Ente", "team@ente.com",
-		ente.BF2024EmailSubject,
-		ente.BF2024EmailTemplate, map[string]interface{}{
-			"Storage": c.readableStorage(offerToBeApplied.Storage),
-		}, nil)
+	workerjobs.Background(func() { c.UserCacheCtrl.GetActiveStorageBonus(context.Background(), userID) })
+	workerjobs.Background(func() {
+		emailUtil.SendTemplatedEmail([]string{email}, "Ente", "team@ente.com",
+			ente.BF2024EmailSubject,
+			ente.BF2024EmailTemplate, map[string]interface{}{
+				"Storage": c.readableStorage(offerToBeApplied.Storage),
+			}, nil)
+	})
 	c.DiscordController.NotifyBlackFridayUser(userID, offerToBeApplied.Price)
 	return nil
 }
