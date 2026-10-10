@@ -18,14 +18,21 @@ func TestOverwriteRetainsOnlyStaleDeletionBuckets(t *testing.T) {
 	for _, preview := range []bool{false, true} {
 		for _, latest := range []string{"b2-eu-cen", "b5"} {
 			t.Run(fmt.Sprintf("preview=%t/latest=%s", preview, latest), func(t *testing.T) {
+				_, err := db.Exec(`DELETE FROM file_data`)
+				require.NoError(t, err)
 				testutil.ResetTables(t, db)
-				t.Cleanup(func() { testutil.ResetTables(t, db) })
+				t.Cleanup(func() {
+					if _, err := db.Exec(`DELETE FROM file_data`); err != nil {
+						t.Error(err)
+					}
+					testutil.ResetTables(t, db)
+				})
 				r := &Repository{DB: db, ObjectCleanupRepo: &repo.ObjectCleanupRepository{DB: db}}
 				typeOfData := ente.MlData
 				if preview {
 					typeOfData = ente.PreviewVideo
 				}
-				_, err := db.Exec(`INSERT INTO file_data(file_id,user_id,data_type,size,latest_bucket,replicated_buckets,delete_from_buckets)
+				_, err = db.Exec(`INSERT INTO file_data(file_id,user_id,data_type,size,latest_bucket,replicated_buckets,delete_from_buckets)
 					VALUES(1,10,$1,11,'b2-eu-cen',$2,$3)`, string(typeOfData), database.Array(db, []string{"b5"}), database.Array(db, []string{"b6"}))
 				require.NoError(t, err)
 				objectID, objectSize := "new-preview", int64(12)
