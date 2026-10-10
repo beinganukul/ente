@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"slices"
 	"strconv"
 
@@ -275,7 +276,7 @@ func (c *BillingController) VerifySubscription(
 		}
 	}
 	if isUpgradingFromFreePlan {
-		go func() {
+		workerjobs.Background(func() {
 			amount := "unknown"
 			plan, _, err := c.getPlanWithCountry(newSubscription)
 			if err != nil {
@@ -284,10 +285,10 @@ func (c *BillingController) VerifySubscription(
 				amount = plan.Price
 			}
 			c.DiscordController.NotifyNewSub(userID, string(paymentProvider), amount)
-		}()
-		go func() {
+		})
+		workerjobs.Background(func() {
 			c.EmailNotificationCtrl.OnAccountUpgrade(userID)
-		}()
+		})
 	}
 	log.Info("Returning new subscription with ID " + strconv.FormatInt(newSubscription.ID, 10))
 	return newSubscription, nil

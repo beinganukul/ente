@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/ente/museum/ente/base"
+	"github.com/ente/museum/pkg/utils/database"
 	timeutil "github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
 )
@@ -26,12 +27,17 @@ func (r *WebPushRepository) UpsertAccountSubscription(
 	defer tx.Rollback()
 
 	var sessionExists int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT 1
 		FROM space_browser_sessions
 		WHERE token_hash = $1
 		FOR UPDATE
-	`, sessionTokenHash).Scan(&sessionExists); err != nil {
+	`, `
+		SELECT 1
+		FROM space_browser_sessions
+		WHERE token_hash = $1
+
+	`), sessionTokenHash).Scan(&sessionExists); err != nil {
 		return "", stacktrace.Propagate(err, "")
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -81,12 +87,17 @@ func (r *WebPushRepository) UpsertLinkSubscription(
 	defer tx.Rollback()
 
 	var activeLinkID int64
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT link_id
 		FROM space_links
 		WHERE link_id = $1 AND active = TRUE
 		FOR UPDATE
-	`, linkID).Scan(&activeLinkID); err != nil {
+	`, `
+		SELECT link_id
+		FROM space_links
+		WHERE link_id = $1 AND active = TRUE
+
+	`), linkID).Scan(&activeLinkID); err != nil {
 		return "", stacktrace.Propagate(err, "")
 	}
 	var subscriptionCount int

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"strings"
 
 	"github.com/ente/museum/ente"
@@ -77,9 +78,9 @@ func (c *MessagesController) Create(ctx context.Context, senderSpace *repo.Space
 		return nil, err
 	}
 	if notificationKind == spaceMessageNotificationKindPoke {
-		go c.ActivityNotifier.OnSpacePokeSent(spaceActivityActor(senderSpace), recipientSpace.OwnerID)
+		workerjobs.Background(func() { c.ActivityNotifier.OnSpacePokeSent(spaceActivityActor(senderSpace), recipientSpace.OwnerID) })
 	} else {
-		go c.ActivityNotifier.OnSpaceMessageSent(spaceActivityActor(senderSpace), recipientSpace.OwnerID)
+		workerjobs.Background(func() { c.ActivityNotifier.OnSpaceMessageSent(spaceActivityActor(senderSpace), recipientSpace.OwnerID) })
 	}
 	return toMessageResponse(*message), nil
 }
@@ -133,7 +134,7 @@ func (c *MessagesController) ReplyToPost(ctx context.Context, senderSpace *repo.
 		}
 		return nil, err
 	}
-	go c.ActivityNotifier.OnSpacePostReplied(spaceActivityActor(senderSpace), recipientSpace.OwnerID)
+	workerjobs.Background(func() { c.ActivityNotifier.OnSpacePostReplied(spaceActivityActor(senderSpace), recipientSpace.OwnerID) })
 	return toMessageResponse(*message), nil
 }
 
@@ -222,7 +223,7 @@ func (c *MessagesController) SetLike(ctx context.Context, actorSpace *repo.Space
 		return nil, err
 	}
 	if like && changed {
-		go c.ActivityNotifier.OnSpaceMessageLiked(spaceActivityActor(actorSpace), recipientUserID)
+		workerjobs.Background(func() { c.ActivityNotifier.OnSpaceMessageLiked(spaceActivityActor(actorSpace), recipientUserID) })
 	}
 	return &models.LikeMessageResponse{Liked: like}, nil
 }
@@ -279,7 +280,7 @@ func (c *MessagesController) SetReaction(ctx context.Context, actorSpace *repo.S
 		return nil, err
 	}
 	if added {
-		go c.ActivityNotifier.OnSpaceMessageLiked(spaceActivityActor(actorSpace), sender.OwnerID)
+		workerjobs.Background(func() { c.ActivityNotifier.OnSpaceMessageLiked(spaceActivityActor(actorSpace), sender.OwnerID) })
 	}
 	return &models.LikeMessageResponse{Liked: true}, nil
 }

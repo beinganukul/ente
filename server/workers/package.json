@@ -1,0 +1,21 @@
+{
+  "name": "ente-museum-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test request.test.mjs test-live.test.mjs && node test.mjs",
+    "test:live": "node test-live.mjs",
+    "test:wasm": "node test-wasm.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.144.0"
+  },
+  "overrides": {
+    "miniflare": {
+      "sharp": "0.35.5"
+    }
+  }
+}

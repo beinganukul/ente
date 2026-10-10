@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ente/museum/pkg/controller/access"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -224,7 +225,7 @@ func (c *FileController) Create(ctx *gin.Context, userID int64, file ente.File, 
 		return file, stacktrace.Propagate(err, "")
 	}
 	if usage == fileSize+thumbnailSize && app == ente.Photos {
-		go c.maybeSendFirstUploadEmail(file.OwnerID, userAgent)
+		workerjobs.Background(func() { c.maybeSendFirstUploadEmail(file.OwnerID, userAgent) })
 	}
 	return file, nil
 }
@@ -485,7 +486,7 @@ func (c *FileController) getSignedURLForAccessibleObject(ctx *gin.Context, userI
 	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			go c.CleanUpStaleCollectionFiles(fileID)
+			workerjobs.Background(func() { c.CleanUpStaleCollectionFiles(fileID) })
 		}
 		return "", stacktrace.Propagate(err, "")
 	}
@@ -511,7 +512,7 @@ func (c *FileController) getSignedURLForOwnedObject(ctx *gin.Context, ownerID in
 	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			go c.CleanUpStaleCollectionFiles(fileID)
+			workerjobs.Background(func() { c.CleanUpStaleCollectionFiles(fileID) })
 		}
 		return "", stacktrace.Propagate(err, "")
 	}
@@ -825,7 +826,7 @@ func (c *FileController) CleanupDeletedFiles() {
 	defer func() {
 		c.LockController.ReleaseLock(DeletedObjectQueueLock)
 	}()
-	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.DeleteObjectQueue, 10000)
+	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.DeleteObjectQueue, workerjobs.BatchSize(10000, 1))
 	if err != nil {
 		log.WithError(err).Error("Failed to fetch items from queue")
 		return
@@ -977,7 +978,7 @@ func (c *FileController) onDuplicateObjectDetected(ctx *gin.Context, file ente.F
 		file.ID = existing.ID
 		return file, nil
 	} else {
-		go c.onExistingObjectsReplaced(ctx, file, hotDC)
+		workerjobs.Background(func() { c.onExistingObjectsReplaced(ctx, file, hotDC) })
 		return ente.File{}, ente.ErrBadRequest
 	}
 }
@@ -1000,7 +1001,9 @@ func (c *FileController) onExistingObjectsReplaced(ctx *gin.Context, file ente.F
 	client := network.GetClientInfo(ctx)
 	reqId := requestid.Get(ctx)
 	revertErr := false
-	go c.safeAlert(fmt.Sprintf(`Client %s replaced an existing object req_id %s for (file: %s, thum %s)`, client, reqId, file.File.ObjectKey, file.Thumbnail.ObjectKey))
+	workerjobs.Background(func() {
+		c.safeAlert(fmt.Sprintf(`Client %s replaced an existing object req_id %s for (file: %s, thum %s)`, client, reqId, file.File.ObjectKey, file.Thumbnail.ObjectKey))
+	})
 	log.Error("Replaced existing object, reverting", file)
 	logger := log.WithFields(log.Fields{
 		"req_id":    reqId,
@@ -1027,9 +1030,13 @@ func (c *FileController) onExistingObjectsReplaced(ctx *gin.Context, file ente.F
 		revertErr = true
 	}
 	if revertErr {
-		go c.safeAlert(fmt.Sprintf(`☠️ Client %s replaced an existing object req_id %s for user %d, failed to revert`, client, reqId, file.OwnerID))
+		workerjobs.Background(func() {
+			c.safeAlert(fmt.Sprintf(`☠️ Client %s replaced an existing object req_id %s for user %d, failed to revert`, client, reqId, file.OwnerID))
+		})
 	} else {
-		go c.safeAlert(fmt.Sprintf(`🔄 Client %s replaced an existing object req_id %s for user %d, reverted`, client, reqId, file.OwnerID))
+		workerjobs.Background(func() {
+			c.safeAlert(fmt.Sprintf(`🔄 Client %s replaced an existing object req_id %s for user %d, reverted`, client, reqId, file.OwnerID))
+		})
 	}
 }
 

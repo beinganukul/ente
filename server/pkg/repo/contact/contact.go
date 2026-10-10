@@ -12,8 +12,8 @@ import (
 	contactmodel "github.com/ente/museum/ente/contact"
 	"github.com/ente/museum/pkg/repo"
 	"github.com/ente/museum/pkg/utils/crypto"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 func (r *Repository) CanCreateContact(ctx context.Context, actorUserID int64, contactUserID int64) (bool, error) {
@@ -54,8 +54,7 @@ func (r *Repository) Create(ctx context.Context, userID int64, req contactmodel.
 		req.EncryptedData,
 	).Scan(&id)
 	if err != nil {
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+		if database.IsUniqueViolation(err) {
 			return "", stacktrace.Propagate(
 				ente.NewBadRequestWithMessage("contact already exists for contactUserID"),
 				"",
@@ -87,8 +86,8 @@ func (r *Repository) ContactUserExists(ctx context.Context, contactUserID int64)
 func (r *Repository) hasActiveEmergencyRelationship(ctx context.Context, actorUserID int64, contactUserID int64) (bool, error) {
 	var exists bool
 	err := r.DB.QueryRowContext(
-		ctx,
-		`SELECT EXISTS(
+		ctx, database.SQL(r.DB,
+			`SELECT EXISTS(
 			SELECT 1
 			FROM emergency_contact
 			WHERE state = ANY($3)
@@ -96,10 +95,17 @@ func (r *Repository) hasActiveEmergencyRelationship(ctx context.Context, actorUs
 					(user_id = $1 AND emergency_contact_id = $2)
 				 OR (user_id = $2 AND emergency_contact_id = $1)
 			  )
-		)`,
-		actorUserID,
-		contactUserID,
-		pq.Array([]ente.ContactState{ente.UserInvitedContact, ente.ContactAccepted}),
+		)`, `SELECT EXISTS(
+			SELECT 1
+			FROM emergency_contact
+			WHERE state IN (SELECT value FROM json_each($3))
+			  AND (
+					(user_id = $1 AND emergency_contact_id = $2)
+				 OR (user_id = $2 AND emergency_contact_id = $1)
+			  )
+		)`), actorUserID,
+		contactUserID, database.Array(r.DB,
+			[]ente.ContactState{ente.UserInvitedContact, ente.ContactAccepted}),
 	).Scan(&exists)
 	if err != nil {
 		return false, err
@@ -205,8 +211,7 @@ func (r *Repository) Update(ctx context.Context, userID int64, id string, req co
 		userID,
 	)
 	if err != nil {
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+		if database.IsUniqueViolation(err) {
 			return stacktrace.Propagate(
 				ente.NewBadRequestWithMessage("contact already exists for contactUserID"),
 				"",
@@ -243,7 +248,7 @@ func (r *Repository) Delete(ctx context.Context, userID int64, id string) error 
 	}
 
 	if entity.ProfilePictureAttachmentID != nil {
-		if err := markAttachmentDeletedTx(ctx, tx, userID, contactmodel.ProfilePicture, *entity.ProfilePictureAttachmentID); err != nil {
+		if err := markAttachmentDeletedTx(ctx, r.DB, tx, userID, contactmodel.ProfilePicture, *entity.ProfilePictureAttachmentID); err != nil {
 			return stacktrace.Propagate(err, "")
 		}
 	}
@@ -334,9 +339,8 @@ func (r *Repository) AttachContactAttachment(
 	objectKey := contactmodel.AttachmentObjectKey(userID, attachmentType, attachmentID)
 	var latestBucket string
 	if err := tx.QueryRowContext(
-		ctx,
-		`SELECT bucket_id FROM temp_objects WHERE object_key = $1 FOR UPDATE`,
-		objectKey,
+		ctx, database.SQL(r.DB,
+			`SELECT bucket_id FROM temp_objects WHERE object_key = $1 FOR UPDATE`, `SELECT bucket_id FROM temp_objects WHERE object_key = $1`), objectKey,
 	).Scan(&latestBucket); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, stacktrace.Propagate(ente.NewBadRequestWithMessage("staged attachment upload not found"), "")
@@ -354,8 +358,7 @@ func (r *Repository) AttachContactAttachment(
 		size,
 		latestBucket,
 	); err != nil {
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+		if database.IsUniqueViolation(err) {
 			return nil, stacktrace.Propagate(ente.NewBadRequestWithMessage("attachmentID already exists"), "")
 		}
 		return nil, stacktrace.Propagate(err, "failed to insert attachment row")
@@ -363,7 +366,7 @@ func (r *Repository) AttachContactAttachment(
 
 	currentAttachmentID := attachmentIDForPolicy(entity, policy)
 	if currentAttachmentID != nil && *currentAttachmentID != "" {
-		if err := markAttachmentDeletedTx(ctx, tx, userID, attachmentType, *currentAttachmentID); err != nil {
+		if err := markAttachmentDeletedTx(ctx, r.DB, tx, userID, attachmentType, *currentAttachmentID); err != nil {
 			return nil, stacktrace.Propagate(err, "")
 		}
 	}
@@ -419,7 +422,7 @@ func (r *Repository) DeleteContactAttachment(
 	}
 	currentAttachmentID := attachmentIDForPolicy(entity, policy)
 	if currentAttachmentID != nil {
-		if err := markAttachmentDeletedTx(ctx, tx, userID, attachmentType, *currentAttachmentID); err != nil {
+		if err := markAttachmentDeletedTx(ctx, r.DB, tx, userID, attachmentType, *currentAttachmentID); err != nil {
 			return nil, stacktrace.Propagate(err, "")
 		}
 		clearSlotQuery := fmt.Sprintf(
@@ -454,7 +457,9 @@ func (r *Repository) GetAttachment(ctx context.Context, userID int64, attachment
 		attachmentID,
 		userID,
 	)
-	attachment, err := scanAttachment(row)
+	attachment, err := scanAttachment(r.DB,
+
+		row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, &ente.ErrNotFoundError
@@ -489,7 +494,8 @@ func (r *Repository) GetStagedAttachmentBucket(
 }
 
 func (r *Repository) AddBucket(row contactmodel.Attachment, bucketID string, columnName string) error {
-	query := fmt.Sprintf(`
+	query := fmt.Sprintf(database.SQL(r.DB,
+		`
 		UPDATE user_attachments
 		SET %s = array(
 			SELECT DISTINCT elem FROM unnest(
@@ -497,7 +503,11 @@ func (r *Repository) AddBucket(row contactmodel.Attachment, bucketID string, col
 			) AS elem
 			WHERE elem IS NOT NULL
 		)
-		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`, columnName, columnName)
+		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`, `
+		UPDATE user_attachments
+		SET %s = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each(json_insert(user_attachments.%s, '$[#]', $1)) AS value
+			WHERE value IS NOT NULL))
+		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`), columnName, columnName)
 	result, err := r.DB.Exec(query, bucketID, row.AttachmentID, row.UserID, string(row.AttachmentType))
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to add bucket to %s", columnName)
@@ -513,7 +523,8 @@ func (r *Repository) AddBucket(row contactmodel.Attachment, bucketID string, col
 }
 
 func (r *Repository) RemoveBucket(row contactmodel.Attachment, bucketID string, columnName string) error {
-	query := fmt.Sprintf(`
+	query := fmt.Sprintf(database.SQL(r.DB,
+		`
 		UPDATE user_attachments
 		SET %s = array(
 			SELECT DISTINCT elem FROM unnest(
@@ -521,7 +532,11 @@ func (r *Repository) RemoveBucket(row contactmodel.Attachment, bucketID string, 
 			) AS elem
 			WHERE elem IS NOT NULL
 		)
-		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`, columnName, columnName)
+		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`, `
+		UPDATE user_attachments
+		SET %s = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each((SELECT json_group_array(value) FROM json_each(user_attachments.%s) WHERE value IS NOT $1)) AS value
+			WHERE value IS NOT NULL))
+		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`), columnName, columnName)
 	result, err := r.DB.Exec(query, bucketID, row.AttachmentID, row.UserID, string(row.AttachmentType))
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to remove bucket from %s", columnName)
@@ -537,7 +552,8 @@ func (r *Repository) RemoveBucket(row contactmodel.Attachment, bucketID string, 
 }
 
 func (r *Repository) MoveBetweenBuckets(row contactmodel.Attachment, bucketID string, sourceColumn string, destColumn string) error {
-	query := fmt.Sprintf(`
+	query := fmt.Sprintf(database.SQL(r.DB,
+		`
 		UPDATE user_attachments
 		SET %s = array(
 			SELECT DISTINCT elem FROM unnest(
@@ -551,7 +567,13 @@ func (r *Repository) MoveBetweenBuckets(row contactmodel.Attachment, bucketID st
 			) AS elem
 			WHERE elem IS NOT NULL
 		)
-		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`, destColumn, destColumn, sourceColumn, sourceColumn)
+		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`, `
+		UPDATE user_attachments
+		SET %s = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each(json_insert(user_attachments.%s, '$[#]', $1)) AS value
+			WHERE value IS NOT NULL)),
+		%s = (SELECT json_group_array(value) FROM (SELECT DISTINCT value FROM json_each((SELECT json_group_array(value) FROM json_each(user_attachments.%s) WHERE value IS NOT $1)) AS value
+			WHERE value IS NOT NULL))
+		WHERE attachment_id = $2 AND user_id = $3 AND attachment_type = $4`), destColumn, destColumn, sourceColumn, sourceColumn)
 	result, err := r.DB.Exec(query, bucketID, row.AttachmentID, row.UserID, string(row.AttachmentType))
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to move bucket from %s to %s", sourceColumn, destColumn)
@@ -581,8 +603,8 @@ func (r *Repository) GetPendingSyncAttachmentAndExtendLock(
 	defer tx.Rollback()
 
 	row := tx.QueryRowContext(
-		ctx,
-		`SELECT attachment_id, user_id, attachment_type, size, latest_bucket, replicated_buckets,
+		ctx, database.SQL(r.DB,
+			`SELECT attachment_id, user_id, attachment_type, size, latest_bucket, replicated_buckets,
 		        delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted, sync_locked_till,
 		        created_at, updated_at
 		   FROM user_attachments
@@ -590,10 +612,18 @@ func (r *Repository) GetPendingSyncAttachmentAndExtendLock(
 		    AND is_deleted = $1
 		    AND sync_locked_till < now_utc_micro_seconds()
 		  LIMIT 1
-		  FOR UPDATE SKIP LOCKED`,
-		forDeletion,
+		  FOR UPDATE SKIP LOCKED`, `SELECT attachment_id, user_id, attachment_type, size, latest_bucket, replicated_buckets,
+		        delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted, sync_locked_till,
+		        created_at, updated_at
+		   FROM user_attachments
+		  WHERE pending_sync = TRUE
+		    AND is_deleted = $1
+		    AND sync_locked_till < CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+		  LIMIT 1`), forDeletion,
 	)
-	attachment, err := scanAttachment(row)
+	attachment, err := scanAttachment(r.DB,
+
+		row)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -653,15 +683,20 @@ func (r *Repository) RegisterReplicationAttempt(ctx context.Context, row contact
 
 func (r *Repository) ResetAttachmentSyncLock(ctx context.Context, row contactmodel.Attachment, syncLockedTill int64) error {
 	_, err := r.DB.ExecContext(
-		ctx,
-		`UPDATE user_attachments
+		ctx, database.SQL(r.DB,
+			`UPDATE user_attachments
 		    SET sync_locked_till = now_utc_micro_seconds()
 		  WHERE pending_sync = FALSE
 		    AND attachment_id = $1
 		    AND user_id = $2
 		    AND attachment_type = $3
-		    AND sync_locked_till = $4`,
-		row.AttachmentID,
+		    AND sync_locked_till = $4`, `UPDATE user_attachments
+		    SET sync_locked_till = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+		  WHERE pending_sync = FALSE
+		    AND attachment_id = $1
+		    AND user_id = $2
+		    AND attachment_type = $3
+		    AND sync_locked_till = $4`), row.AttachmentID,
 		row.UserID,
 		string(row.AttachmentType),
 		syncLockedTill,
@@ -674,8 +709,8 @@ func (r *Repository) ResetAttachmentSyncLock(ctx context.Context, row contactmod
 
 func (r *Repository) DeleteAttachment(ctx context.Context, row contactmodel.Attachment) error {
 	res, err := r.DB.ExecContext(
-		ctx,
-		`DELETE FROM user_attachments
+		ctx, database.SQL(r.DB,
+			`DELETE FROM user_attachments
 		  WHERE attachment_id = $1
 		    AND attachment_type = $2
 		    AND latest_bucket = $3
@@ -683,8 +718,15 @@ func (r *Repository) DeleteAttachment(ctx context.Context, row contactmodel.Atta
 		    AND replicated_buckets = ARRAY[]::s3region[]
 		    AND delete_from_buckets = ARRAY[]::s3region[]
 		    AND inflight_rep_buckets = ARRAY[]::s3region[]
-		    AND is_deleted = TRUE`,
-		row.AttachmentID,
+		    AND is_deleted = TRUE`, `DELETE FROM user_attachments
+		  WHERE attachment_id = $1
+		    AND attachment_type = $2
+		    AND latest_bucket = $3
+		    AND user_id = $4
+		    AND replicated_buckets = '[]'
+		    AND delete_from_buckets = '[]'
+		    AND inflight_rep_buckets = '[]'
+		    AND is_deleted = TRUE`), row.AttachmentID,
 		string(row.AttachmentType),
 		row.LatestBucket,
 		row.UserID,
@@ -704,13 +746,15 @@ func (r *Repository) DeleteAttachment(ctx context.Context, row contactmodel.Atta
 
 func (r *Repository) getForUpdate(ctx context.Context, tx *sql.Tx, userID int64, id string) (*contactmodel.Entity, error) {
 	row := tx.QueryRowContext(
-		ctx,
-		`SELECT id, user_id, contact_user_id, profile_picture_attachment_id, encrypted_key, encrypted_data,
+		ctx, database.SQL(r.DB,
+			`SELECT id, user_id, contact_user_id, profile_picture_attachment_id, encrypted_key, encrypted_data,
 		        is_deleted, created_at, updated_at
 		   FROM contact_entity
 		  WHERE id = $1 AND user_id = $2
-		  FOR UPDATE`,
-		id,
+		  FOR UPDATE`, `SELECT id, user_id, contact_user_id, profile_picture_attachment_id, encrypted_key, encrypted_data,
+		        is_deleted, created_at, updated_at
+		   FROM contact_entity
+		  WHERE id = $1 AND user_id = $2`), id,
 		userID,
 	)
 	entity, err := scanEntity(row)
@@ -723,10 +767,10 @@ func (r *Repository) getForUpdate(ctx context.Context, tx *sql.Tx, userID int64,
 	return entity, nil
 }
 
-func markAttachmentDeletedTx(ctx context.Context, tx *sql.Tx, userID int64, attachmentType contactmodel.AttachmentType, attachmentID string) error {
+func markAttachmentDeletedTx(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64, attachmentType contactmodel.AttachmentType, attachmentID string) error {
 	_, err := tx.ExecContext(
-		ctx,
-		`UPDATE user_attachments
+		ctx, database.SQL(db,
+			`UPDATE user_attachments
 		    SET is_deleted = TRUE,
 		        pending_sync = TRUE,
 		        sync_locked_till = 0,
@@ -740,8 +784,19 @@ func markAttachmentDeletedTx(ctx context.Context, tx *sql.Tx, userID int64, atta
 		  WHERE attachment_id = $1
 		    AND user_id = $2
 		    AND attachment_type = $3
-		    AND is_deleted = FALSE`,
-		attachmentID,
+		    AND is_deleted = FALSE`, `UPDATE user_attachments
+		    SET is_deleted = TRUE,
+		        pending_sync = TRUE,
+		        sync_locked_till = 0,
+		        delete_from_buckets = (SELECT json_group_array(value) FROM (SELECT DISTINCT value
+		              FROM json_each((SELECT json_group_array(value) FROM (SELECT value FROM json_each((SELECT json_group_array(value) FROM (SELECT value FROM json_each(replicated_buckets) UNION ALL SELECT value FROM json_each(delete_from_buckets)))) UNION ALL SELECT value FROM json_each(inflight_rep_buckets)))) AS value
+		             WHERE value IS NOT NULL)),
+		        replicated_buckets = '[]',
+		        inflight_rep_buckets = '[]'
+		  WHERE attachment_id = $1
+		    AND user_id = $2
+		    AND attachment_type = $3
+		    AND is_deleted = FALSE`), attachmentID,
 		userID,
 		string(attachmentType),
 	)
@@ -856,18 +911,17 @@ func scanEntityWithEncryptedEmail(scanner rowScanner) (*contactmodel.Entity, *[]
 	return &entity, emailPtr, noncePtr, nil
 }
 
-func scanAttachment(scanner rowScanner) (*contactmodel.Attachment, error) {
+func scanAttachment(db *sql.DB, scanner rowScanner) (*contactmodel.Attachment, error) {
 	var attachment contactmodel.Attachment
 	if err := scanner.Scan(
 		&attachment.AttachmentID,
 		&attachment.UserID,
 		&attachment.AttachmentType,
 		&attachment.Size,
-		&attachment.LatestBucket,
-		pq.Array(&attachment.ReplicatedBuckets),
-		pq.Array(&attachment.DeleteFromBuckets),
-		pq.Array(&attachment.InflightRepBuckets),
-		&attachment.PendingSync,
+		&attachment.LatestBucket, database.Array(db,
+			&attachment.ReplicatedBuckets), database.Array(db,
+			&attachment.DeleteFromBuckets), database.Array(db,
+			&attachment.InflightRepBuckets), &attachment.PendingSync,
 		&attachment.IsDeleted,
 		&attachment.SyncLockedTill,
 		&attachment.CreatedAt,

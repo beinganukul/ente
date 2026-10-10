@@ -16,7 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/awa/go-iap/appstore"
-	"github.com/awa/go-iap/playstore"
+	"github.com/ente/museum/pkg/utils/playstore"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/pkg/controller"

@@ -28,3 +28,21 @@ jobs:
 
             - name: Test
               run: ./scripts/test-with-postgres.sh docker
+
+            - name: Test libSQL contracts, schema parity, and transfer
+              run: ./scripts/test-with-libsql.sh
+
+            - name: Setup Node.js for Workers
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+              with:
+                  node-version: 24
+                  cache: npm
+                  cache-dependency-path: server/workers/package-lock.json
+
+            - name: Build and test Workers WebAssembly
+              working-directory: server/workers
+              run: |
+                  npm ci
+                  npm run build
+                  npm run test:wasm
+                  node --test request.test.mjs test-live.test.mjs

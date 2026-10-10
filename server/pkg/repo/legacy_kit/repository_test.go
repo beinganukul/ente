@@ -8,6 +8,7 @@ import (
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/internal/testutil"
+	"github.com/ente/museum/pkg/utils/database"
 	timeutil "github.com/ente/museum/pkg/utils/time"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -36,8 +37,8 @@ func TestGetSessionByIDAndTokenForUseReturnsBlockedSessionAfterConcurrentBlock(t
 
 	tx, err := db.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
-	_, err = tx.ExecContext(t.Context(),
-		`SELECT id FROM legacy_kit_recovery_session WHERE id = $1 FOR UPDATE`, sessionID)
+	_, err = tx.ExecContext(t.Context(), database.SQL(db,
+		`SELECT id FROM legacy_kit_recovery_session WHERE id = $1 FOR UPDATE`, `SELECT id FROM legacy_kit_recovery_session WHERE id = $1`), sessionID)
 	require.NoError(t, err)
 
 	repo := &Repository{DB: db}
@@ -92,8 +93,8 @@ func TestOpenOrResumeRecoveryFailsIfKitWasDeletedBeforeLockReleases(t *testing.T
 
 	tx, err := db.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
-	_, err = tx.ExecContext(t.Context(),
-		`SELECT id FROM legacy_kit WHERE id = $1 FOR UPDATE`, kitID)
+	_, err = tx.ExecContext(t.Context(), database.SQL(db,
+		`SELECT id FROM legacy_kit WHERE id = $1 FOR UPDATE`, `SELECT id FROM legacy_kit WHERE id = $1`), kitID)
 	require.NoError(t, err)
 
 	type openResult struct {
@@ -156,8 +157,8 @@ func TestCreateKitWithLimitRejectsWhenConcurrentChangeConsumesFinalSlot(t *testi
 
 	tx, err := db.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
-	_, err = tx.ExecContext(t.Context(),
-		`SELECT user_id FROM users WHERE user_id = $1 FOR UPDATE`, userID)
+	_, err = tx.ExecContext(t.Context(), database.SQL(db,
+		`SELECT user_id FROM users WHERE user_id = $1 FOR UPDATE`, `SELECT user_id FROM users WHERE user_id = $1`), userID)
 	require.NoError(t, err)
 
 	repo := &Repository{DB: db}
@@ -311,11 +312,12 @@ func insertLegacyKitSessionForTest(
 ) {
 	t.Helper()
 
-	_, err := db.Exec(
+	_, err := db.Exec(database.SQL(db,
 		`INSERT INTO legacy_kit_recovery_session(
 			id, kit_id, user_id, status, effective_notice_period_in_hrs, wait_till, initiators
-		) VALUES($1, $2, $3, $4, $5, $6, '[]'::jsonb)`,
-		sessionID,
+		) VALUES($1, $2, $3, $4, $5, $6, '[]'::jsonb)`, `INSERT INTO legacy_kit_recovery_session(
+			id, kit_id, user_id, status, effective_notice_period_in_hrs, wait_till, initiators
+		) VALUES($1, $2, $3, $4, $5, $6, '[]')`), sessionID,
 		kitID,
 		userID,
 		status,

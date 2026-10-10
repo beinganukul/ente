@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"database/sql"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -15,8 +16,9 @@ import (
 )
 
 const (
-	spaceTempObjectCleanupBatchSize = 1000
-	spaceTempObjectRetryDelay       = 24 * time.Hour
+	spaceTempObjectCleanupBatchSize       = 1000
+	spaceTempObjectWorkerCleanupBatchSize = 5
+	spaceTempObjectRetryDelay             = 24 * time.Hour
 )
 
 type CleanupController struct {
@@ -24,6 +26,9 @@ type CleanupController struct {
 }
 
 func (c *CleanupController) StartRemovingUnreportedObjects() {
+	if workerjobs.Register("@every 1m", func() { c.removeUnreportedObjects(context.Background()) }) {
+		return
+	}
 	workerCount := viper.GetInt("jobs.space-remove-unreported-objects.worker-count")
 	if workerCount == 0 {
 		workerCount = 1
@@ -47,8 +52,12 @@ func (c *CleanupController) removeUnreportedObjectsWorker(i int) {
 }
 
 func (c *CleanupController) removeUnreportedObjects(ctx context.Context) int {
+	return c.removeUnreportedObjectsBatch(ctx, workerjobs.BatchSize(spaceTempObjectCleanupBatchSize, spaceTempObjectWorkerCleanupBatchSize))
+}
+
+func (c *CleanupController) removeUnreportedObjectsBatch(ctx context.Context, batchSize int) int {
 	logger := log.WithField("task", "space-remove-unreported-objects")
-	tx, tempObjects, err := c.AssetsRepo.GetAndLockExpiredTempObjects(ctx, timeutil.Microseconds(), spaceTempObjectCleanupBatchSize)
+	tx, tempObjects, err := c.AssetsRepo.GetAndLockExpiredTempObjects(ctx, timeutil.Microseconds(), batchSize)
 	if err != nil {
 		logger.Error(err)
 		return 0

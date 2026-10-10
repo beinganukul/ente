@@ -5,8 +5,10 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"io"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -354,15 +356,24 @@ func (c *Controller) StartReplication() error {
 	if err := c.createTemporaryStorage(); err != nil {
 		return stacktrace.Propagate(err, "failed to create temporary storage")
 	}
+	if workerjobs.Register("@every 1m", func() { _ = c.tryReplicate() }) {
+		return nil
+	}
 	go c.startReplicationWorkers(workerCount)
 	return nil
 }
 
 func (c *Controller) StartDataDeletion() {
+	if workerjobs.Register("@every 1m", func() { _ = c.tryDelete() }) {
+		return
+	}
 	go c.startDeleteWorkers(1)
 }
 
 func (c *Controller) createTemporaryStorage() error {
+	if runtime.GOOS == "js" {
+		return nil
+	}
 	tempStorage := viper.GetString("replication.contact-attachments.tmp-storage")
 	if tempStorage == "" {
 		tempStorage = "tmp/replication-contact-attachments"
@@ -506,6 +517,9 @@ func getAttachmentBucketColumnMap(row contactmodel.Attachment) (map[string]strin
 }
 
 func (c *Controller) replicateAttachmentObject(ctx context.Context, row contactmodel.Attachment, dstBucketID string) error {
+	if runtime.GOOS == "js" {
+		return c.S3Config.StreamCopy(ctx, row.LatestBucket, dstBucketID, row.ObjectKey(), row.Size)
+	}
 	if err := fileutil.EnsureSufficientSpace(row.Size); err != nil {
 		return stacktrace.Propagate(err, "")
 	}

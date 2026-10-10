@@ -1,10 +1,12 @@
 package repo
 
 import (
+	"crypto/sha256"
 	"testing"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/internal/testutil"
+	"github.com/ente/museum/pkg/utils/database"
 )
 
 func TestUserInactivityUsesLatestActivityAcrossSources(t *testing.T) {
@@ -24,10 +26,10 @@ func TestUserInactivityUsesLatestActivityAcrossSources(t *testing.T) {
 	})
 
 	_, err := db.Exec(
-		`INSERT INTO tokens(user_id, token, creation_time, last_used_at, app)
+		`INSERT INTO tokens(user_id, token_hash, creation_time, last_used_at, app)
 		 VALUES($1, $2, $3, $4, $5)`,
 		userID,
-		"stale-token",
+		func() []byte { h := sha256.Sum256([]byte("stale-token")); return h[:] }(),
 		beforeTime-200,
 		beforeTime-100,
 		ente.Photos,
@@ -37,10 +39,10 @@ func TestUserInactivityUsesLatestActivityAcrossSources(t *testing.T) {
 	}
 
 	lastCollectionActivity := beforeTime + 100
-	_, err = db.Exec(
+	_, err = db.Exec(database.SQL(db,
 		`INSERT INTO collections(owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, app)
-		 VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`,
-		userID,
+		 VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`, `INSERT INTO collections(owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, app)
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8)`), userID,
 		"encrypted-key",
 		"key-nonce",
 		"Recent collection",

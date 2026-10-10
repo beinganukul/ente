@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"strings"
 
 	"github.com/ente/museum/ente"
@@ -124,10 +125,12 @@ func (c *PostsController) Create(ctx context.Context, space *repo.SpaceRecord, r
 		return nil, err
 	}
 	if postCount == spacePostLimitWarningThreshold && c.AbuseNotifier != nil {
-		go c.AbuseNotifier.NotifyPotentialAbuse(fmt.Sprintf(
-			"Space %s owned by user %d has reached %d of %d posts",
-			space.SpaceID, space.OwnerID, postCount, repo.MaxPostsPerSpace,
-		))
+		workerjobs.Background(func() {
+			c.AbuseNotifier.NotifyPotentialAbuse(fmt.Sprintf(
+				"Space %s owned by user %d has reached %d of %d posts",
+				space.SpaceID, space.OwnerID, postCount, repo.MaxPostsPerSpace,
+			))
+		})
 	}
 	if postCount > 0 {
 		c.notifyFriendsOfNewPost(spaceActivityActor(space), postID)
@@ -136,7 +139,7 @@ func (c *PostsController) Create(ctx context.Context, space *repo.SpaceRecord, r
 }
 
 func (c *PostsController) notifyFriendsOfNewPost(actor SpaceActivityActor, postID int64) {
-	go c.ActivityNotifier.OnSpacePostCreated(actor, postID)
+	workerjobs.Background(func() { c.ActivityNotifier.OnSpacePostCreated(actor, postID) })
 }
 
 func (c *PostsController) postResponses(ctx context.Context, posts []repo.SpacePostRecord, includeAuthor bool) ([]models.PostResponse, error) {
@@ -269,7 +272,7 @@ func (c *PostsController) SetLike(ctx context.Context, actorSpace *repo.SpaceRec
 		return nil, err
 	}
 	if like && created {
-		go c.ActivityNotifier.OnSpacePostLiked(spaceActivityActor(actorSpace), post.OwnerID)
+		workerjobs.Background(func() { c.ActivityNotifier.OnSpacePostLiked(spaceActivityActor(actorSpace), post.OwnerID) })
 	}
 	return &models.LikePostResponse{Liked: like}, nil
 }

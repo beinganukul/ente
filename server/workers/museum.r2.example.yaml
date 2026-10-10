@@ -1,0 +1,13 @@
+# Store this YAML as MUSEUM_CONFIG after substituting your account and bucket.
+# Set database, SMTP, Museum keys, and the two S3 credentials as Worker secrets.
+s3:
+  use_path_style_urls: true
+  b2-eu-cen:
+    endpoint: https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+    region: auto
+    bucket: ente-test
+replication:
+  enabled: false
+space:
+  assets:
+    primaryBucket: b2-eu-cen

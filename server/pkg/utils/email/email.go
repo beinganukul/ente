@@ -3,12 +3,10 @@ package email
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/tls"
 	"fmt"
 	"html/template"
 	"mime"
 	"mime/quotedprintable"
-	"net"
 	"net/mail"
 	"net/smtp"
 	"path"
@@ -194,34 +192,6 @@ func sendViaSMTP(toEmails []string, fromName string, fromEmail string, subject s
 	return nil
 }
 
-func sendMailWithEncryption(host, port string, auth smtp.Auth, from string, to []string, msg []byte, encryption string) error {
-	addr := net.JoinHostPort(host, port)
-
-	switch strings.ToLower(encryption) {
-	case "tls", "ssl":
-		tlsConfig := &tls.Config{
-			ServerName: host,
-			MinVersion: tls.VersionTLS12,
-		}
-		conn, err := tls.Dial("tcp", addr, tlsConfig)
-		if err != nil {
-			return stacktrace.Propagate(err, "failed to establish TLS connection")
-		}
-		defer conn.Close()
-
-		client, err := smtp.NewClient(conn, host)
-		if err != nil {
-			return stacktrace.Propagate(err, "failed to create SMTP client over TLS")
-		}
-		defer client.Close()
-
-		return sendWithClient(client, auth, from, to, msg)
-
-	default:
-		return smtp.SendMail(addr, auth, from, to, msg)
-	}
-}
-
 func sendWithClient(client *smtp.Client, auth smtp.Auth, from string, to []string, msg []byte) error {
 	if auth != nil {
 		if err := client.Auth(auth); err != nil {
@@ -254,8 +224,13 @@ func sendWithClient(client *smtp.Client, auth smtp.Auth, from string, to []strin
 		return stacktrace.Propagate(err, "failed to close message writer")
 	}
 
-	err = client.Quit()
-	return stacktrace.Propagate(err, "")
+	// DATA's final 250 reply transfers responsibility for the queued message to
+	// the server. A failed QUIT/TLS close cannot revoke that acceptance; reporting
+	// delivery failure here would make clients retry an already delivered OTP.
+	if err := client.Quit(); err != nil {
+		log.WithError(err).Warn("SMTP message accepted; connection cleanup failed")
+	}
+	return nil
 }
 
 func SendTemplatedEmail(to []string, fromName string, fromEmail string, subject string, templateName string, templateData map[string]interface{}, inlineImages []map[string]interface{}) error {

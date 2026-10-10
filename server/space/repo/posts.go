@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ente/museum/ente/base"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -79,12 +80,17 @@ func (r *PostsRepository) CreatePost(ctx context.Context, spaceID string, encryp
 	}
 	defer tx.Rollback()
 	var currentVersion int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT current_version
 		FROM spaces
 		WHERE space_id = $1
 		FOR UPDATE
-	`, spaceID).Scan(&currentVersion); err != nil {
+	`, `
+		SELECT current_version
+		FROM spaces
+		WHERE space_id = $1
+
+	`), spaceID).Scan(&currentVersion); err != nil {
 		return 0, 0, stacktrace.Propagate(err, "")
 	}
 	if currentVersion != keyVersion {
@@ -212,7 +218,7 @@ func (r *PostsRepository) ListFeed(ctx context.Context, viewerSpaceID string, cu
 			           FROM space_post_likes l
 			           WHERE l.post_id = p.post_id
 			             AND l.actor_space_id = $1
-			       ) END`) + `
+			       ) END`) + database.SQL(r.DB, `
 			FROM (
 			    SELECT $1::TEXT AS space_id
 			    UNION ALL
@@ -220,7 +226,15 @@ func (r *PostsRepository) ListFeed(ctx context.Context, viewerSpaceID string, cu
 			) accessible_spaces
 			JOIN space_posts p ON p.space_id = accessible_spaces.space_id
 			JOIN spaces w ON w.space_id = p.space_id
-			` + spaceActorAvatarJoin("w", "w_avatar") + `
+			`, `
+			FROM (
+			    SELECT CAST($1 AS TEXT) AS space_id
+			    UNION ALL
+			    SELECT space_id FROM space_friend_shares WHERE friend_space_id = $1
+			) accessible_spaces
+			JOIN space_posts p ON p.space_id = accessible_spaces.space_id
+			JOIN spaces w ON w.space_id = p.space_id
+			`) + spaceActorAvatarJoin("w", "w_avatar") + `
 			JOIN users u ON u.user_id = w.owner_id AND u.encrypted_email IS NOT NULL
 			WHERE p.is_deleted = FALSE`
 	if cursorCreatedAt, cursorPostID, ok := parsePostCursor(cursor); ok {
@@ -350,11 +364,15 @@ func (r *PostsRepository) SetLikeWithCreated(ctx context.Context, postID int64, 
 	}
 	defer tx.Rollback()
 	var recipientSpaceID string
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT space_id FROM space_posts
 		WHERE post_id = $1 AND space_id <> $2 AND is_deleted = FALSE
 		FOR NO KEY UPDATE
-	`, postID, actorSpaceID).Scan(&recipientSpaceID); err != nil {
+	`, `
+		SELECT space_id FROM space_posts
+		WHERE post_id = $1 AND space_id <> $2 AND is_deleted = FALSE
+
+	`), postID, actorSpaceID).Scan(&recipientSpaceID); err != nil {
 		return false, stacktrace.Propagate(err, "")
 	}
 	if !like {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/ente/museum/pkg/repo"
 	"github.com/ente/museum/pkg/utils/time"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	log "github.com/sirupsen/logrus"
 	"strconv"
 )
@@ -19,7 +20,7 @@ func (c *Controller) CleanupDeletedEmbeddings() {
 	defer func() {
 		c.cleanupCronRunning = false
 	}()
-	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.DeleteEmbeddingsQueue, 200)
+	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.DeleteEmbeddingsQueue, workerjobs.BatchSize(200, 1))
 	if err != nil {
 		log.WithError(err).Error("Failed to fetch items from queue")
 		return

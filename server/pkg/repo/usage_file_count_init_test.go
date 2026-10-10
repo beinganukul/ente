@@ -7,6 +7,7 @@ import (
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/internal/testutil"
 	"github.com/ente/museum/pkg/repo/public"
+	"github.com/ente/museum/pkg/utils/database"
 )
 
 func TestInitializeFileCountsIncludesLegacyMembershipsInDeletedCollections(t *testing.T) {
@@ -69,7 +70,8 @@ func TestInitializeFileCountsRejectsInconsistentHistory(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, db, userID := setupCollectionMembershipTest(t)
 			testutil.InsertUser(t, db, testutil.UserFixture{UserID: 2, Email: "other@ente.io", CreationTime: 1})
-			if _, err := db.Exec(`INSERT INTO collections
+			if _, err := db.Exec(database.SQL(db,
+				`INSERT INTO collections
 				(collection_id, owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, app)
 				OVERRIDING SYSTEM VALUE VALUES
 				(101, 1, 'key', 'nonce', 'Locker', 'album', '{}', 1, 'locker'),
@@ -81,7 +83,19 @@ func TestInitializeFileCountsRejectsInconsistentHistory(t *testing.T) {
 				(202, 2, 'header', 'header', 'header', 'metadata', 1);
 				INSERT INTO collection_files
 					(collection_id, file_id, encrypted_key, key_decryption_nonce, updation_time, c_owner_id, f_owner_id)
-				VALUES (101, 201, 'key', 'nonce', 1, 1, 1), (101, 202, 'key', 'nonce', 1, 1, 2)`); err != nil {
+				VALUES (101, 201, 'key', 'nonce', 1, 1, 1), (101, 202, 'key', 'nonce', 1, 1, 2)`, `INSERT INTO collections
+				(collection_id, owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, app)
+				 VALUES
+				(101, 1, 'key', 'nonce', 'Locker', 'album', '{}', 1, 'locker'),
+				(102, 1, 'key', 'nonce', 'Photos', 'album', '{}', 1, 'photos');
+				INSERT INTO files(file_id, owner_id, file_decryption_header, thumbnail_decryption_header,
+					metadata_decryption_header, encrypted_metadata, updation_time)
+				 VALUES
+				(201, 1, 'header', 'header', 'header', 'metadata', 1),
+				(202, 2, 'header', 'header', 'header', 'metadata', 1);
+				INSERT INTO collection_files
+					(collection_id, file_id, encrypted_key, key_decryption_nonce, updation_time, c_owner_id, f_owner_id)
+				VALUES (101, 201, 'key', 'nonce', 1, 1, 1), (101, 202, 'key', 'nonce', 1, 1, 2)`)); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.Exec(tt.sql); err != nil {

@@ -15,6 +15,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	stime "time"
 )
@@ -177,6 +178,9 @@ type ReplicateObjectReq struct {
 }
 
 func (c *Controller) replicateObject(ctx context.Context, req *ReplicateObjectReq) error {
+	if runtime.GOOS == "js" {
+		return c.S3Config.StreamCopy(ctx, req.SrcBucketID, req.DestBucketID, req.ObjectKey, req.ObjectSize)
+	}
 	if err := file.EnsureSufficientSpace(req.ObjectSize); err != nil {
 		return stacktrace.Propagate(err, "")
 	}

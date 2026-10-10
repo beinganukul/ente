@@ -14,9 +14,9 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/s3config"
 	"github.com/ente/museum/pkg/utils/time"
-	"github.com/lib/pq"
 )
 
 type FileRepository struct {
@@ -37,7 +37,7 @@ func (repo *FileRepository) Create(
 	app ente.App,
 ) (ente.File, int64, error) {
 	hotDC := repo.S3Config.GetHotDataCenter()
-	dcsForNewEntry := pq.StringArray{hotDC}
+	dcsForNewEntry := database.Array(repo.DB, []string{hotDC})
 	if file.OwnerID != collectionOwnerID {
 		return file, -1, stacktrace.Propagate(errors.New("both file and collection should belong to same owner"), "")
 	}
@@ -77,7 +77,7 @@ func (repo *FileRepository) Create(
 	_, err = tx.ExecContext(ctx, `INSERT INTO object_keys(file_id, o_type, object_key, size, datacenters)
 			VALUES($1, $2, $3, $4, $5)`, fileID, ente.FILE, file.File.ObjectKey, fileSize, dcsForNewEntry)
 	if err != nil {
-		if err.Error() == "pq: duplicate key value violates unique constraint \"object_keys_object_key_key\"" {
+		if database.IsUniqueViolationFor(err, "object_keys_object_key_key", "object_keys.object_key") {
 			return file, -1, ente.ErrDuplicateFileObjectFound
 		}
 		return file, -1, stacktrace.Propagate(err, "")
@@ -85,7 +85,7 @@ func (repo *FileRepository) Create(
 	_, err = tx.ExecContext(ctx, `INSERT INTO object_keys(file_id, o_type, object_key, size, datacenters)
 			VALUES($1, $2, $3, $4, $5)`, fileID, ente.THUMBNAIL, file.Thumbnail.ObjectKey, thumbnailSize, dcsForNewEntry)
 	if err != nil {
-		if err.Error() == "pq: duplicate key value violates unique constraint \"object_keys_object_key_key\"" {
+		if database.IsUniqueViolationFor(err, "object_keys_object_key_key", "object_keys.object_key") {
 			return file, -1, ente.ErrDuplicateThumbnailObjectFound
 		}
 		return file, -1, stacktrace.Propagate(err, "")
@@ -255,7 +255,7 @@ func (repo *FileRepository) ResetNeedsReplication(file ente.File, hotDC string) 
 
 func (repo *FileRepository) Update(file ente.File, fileSize int64, thumbnailSize int64, usageDiff int64, oldObjects []string, stagedObjects []string) error {
 	hotDC := repo.S3Config.GetHotDataCenter()
-	dcsForNewEntry := pq.StringArray{hotDC}
+	dcsForNewEntry := database.Array(repo.DB, []string{hotDC})
 	// iOS may retry after backgrounding before receiving a successful response.
 	// Only matching object keys and total size make the update a duplicate.
 	isDuplicateRequest := len(stagedObjects) == 0 && usageDiff == 0
@@ -267,7 +267,7 @@ func (repo *FileRepository) Update(file ente.File, fileSize int64, thumbnailSize
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE files SET encrypted_metadata = $1,
-			file_decryption_header = $2, thumbnail_decryption_header = $3, 
+			file_decryption_header = $2, thumbnail_decryption_header = $3,
 			metadata_decryption_header = $4, updation_time = $5 , info = $6 WHERE file_id = $7`,
 		file.Metadata.EncryptedData, file.File.DecryptionHeader,
 		file.Thumbnail.DecryptionHeader, file.Metadata.DecryptionHeader,
@@ -275,7 +275,7 @@ func (repo *FileRepository) Update(file ente.File, fileSize int64, thumbnailSize
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	updatedRows, err := tx.QueryContext(ctx, `UPDATE collection_files 
+	updatedRows, err := tx.QueryContext(ctx, `UPDATE collection_files
 			SET updation_time = $1 WHERE file_id = $2 RETURNING collection_id`, file.UpdationTime,
 		file.ID)
 	if err != nil {
@@ -291,17 +291,21 @@ func (repo *FileRepository) Update(file ente.File, fileSize int64, thumbnailSize
 		}
 		updatedCIDs = append(updatedCIDs, cID)
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE collections SET updation_time = $1
-			WHERE collection_id = ANY($2)`, file.UpdationTime, pq.Array(updatedCIDs))
+	_, err = tx.ExecContext(ctx, database.SQL(repo.DB,
+		`UPDATE collections SET updation_time = $1
+			WHERE collection_id = ANY($2)`, `UPDATE collections SET updation_time = $1
+			WHERE collection_id IN (SELECT value FROM json_each($2))`), file.UpdationTime, database.Array(repo.DB,
+		updatedCIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	_, err = tx.ExecContext(ctx, `DELETE FROM object_copies WHERE object_key = ANY($1)`,
-		pq.Array(oldObjects))
+	_, err = tx.ExecContext(ctx, database.SQL(repo.DB,
+		`DELETE FROM object_copies WHERE object_key = ANY($1)`, `DELETE FROM object_copies WHERE object_key IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		oldObjects))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE object_keys 
+	_, err = tx.ExecContext(ctx, `UPDATE object_keys
 			SET object_key = $1, size = $2,
 				datacenters = CASE WHEN object_key = $1 THEN datacenters ELSE $3 END
 			WHERE file_id = $4 AND o_type = $5`,
@@ -309,7 +313,7 @@ func (repo *FileRepository) Update(file ente.File, fileSize int64, thumbnailSize
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE object_keys 
+	_, err = tx.ExecContext(ctx, `UPDATE object_keys
 			SET object_key = $1, size = $2,
 				datacenters = CASE WHEN object_key = $1 THEN datacenters ELSE $3 END
 			WHERE file_id = $4 AND o_type = $5`,
@@ -317,7 +321,7 @@ func (repo *FileRepository) Update(file ente.File, fileSize int64, thumbnailSize
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	_, err = applyUsageChange(ctx, tx, file.OwnerID, usageChange{StorageDelta: usageDiff})
+	_, err = applyUsageChange(ctx, repo.DB, tx, file.OwnerID, usageChange{StorageDelta: usageDiff})
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -378,9 +382,11 @@ func (repo *FileRepository) UpdateMagicAttributes(
 		return tx.Commit()
 	}
 	// todo: full table scan, need to add index (for discussion: add user_id and idx {user_id, file_id}).
-	updatedRows, err := tx.QueryContext(ctx, `UPDATE collection_files 
-			SET updation_time = $1 WHERE file_id = ANY($2) AND is_deleted= false RETURNING collection_id`, updationTime,
-		pq.Array(fileIDs))
+	updatedRows, err := tx.QueryContext(ctx, database.SQL(repo.DB,
+		`UPDATE collection_files
+			SET updation_time = $1 WHERE file_id = ANY($2) AND is_deleted= false RETURNING collection_id`, `UPDATE collection_files
+			SET updation_time = $1 WHERE file_id IN (SELECT value FROM json_each($2)) AND is_deleted= false RETURNING collection_id`), updationTime, database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -394,8 +400,11 @@ func (repo *FileRepository) UpdateMagicAttributes(
 		}
 		updatedCIDs = append(updatedCIDs, cID)
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE collections SET updation_time = $1
-			WHERE collection_id = ANY($2)`, updationTime, pq.Array(updatedCIDs))
+	_, err = tx.ExecContext(ctx, database.SQL(repo.DB,
+		`UPDATE collections SET updation_time = $1
+			WHERE collection_id = ANY($2)`, `UPDATE collections SET updation_time = $1
+			WHERE collection_id IN (SELECT value FROM json_each($2))`), updationTime, database.Array(repo.DB,
+		updatedCIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -404,7 +413,7 @@ func (repo *FileRepository) UpdateMagicAttributes(
 
 func (repo *FileRepository) UpdateThumbnail(ctx context.Context, fileID int64, userID int64, thumbnail ente.FileAttributes, thumbnailSize int64, usageDiff int64, oldThumbnailObject *string) error {
 	hotDC := repo.S3Config.GetHotDataCenter()
-	dcsForNewEntry := pq.StringArray{hotDC}
+	dcsForNewEntry := database.Array(repo.DB, []string{hotDC})
 
 	tx, err := repo.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -412,15 +421,15 @@ func (repo *FileRepository) UpdateThumbnail(ctx context.Context, fileID int64, u
 	}
 	defer tx.Rollback()
 	updationTime := time.Microseconds()
-	_, err = tx.ExecContext(ctx, `UPDATE files SET 
-			thumbnail_decryption_header = $1, 
+	_, err = tx.ExecContext(ctx, `UPDATE files SET
+			thumbnail_decryption_header = $1,
 			updation_time = $2 WHERE file_id = $3`,
 		thumbnail.DecryptionHeader,
 		updationTime, fileID)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	updatedRows, err := tx.QueryContext(ctx, `UPDATE collection_files 
+	updatedRows, err := tx.QueryContext(ctx, `UPDATE collection_files
 			SET updation_time = $1 WHERE file_id = $2 RETURNING collection_id`, updationTime,
 		fileID)
 	if err != nil {
@@ -436,8 +445,11 @@ func (repo *FileRepository) UpdateThumbnail(ctx context.Context, fileID int64, u
 		}
 		updatedCIDs = append(updatedCIDs, cID)
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE collections SET updation_time = $1
-			WHERE collection_id = ANY($2)`, updationTime, pq.Array(updatedCIDs))
+	_, err = tx.ExecContext(ctx, database.SQL(repo.DB,
+		`UPDATE collections SET updation_time = $1
+			WHERE collection_id = ANY($2)`, `UPDATE collections SET updation_time = $1
+			WHERE collection_id IN (SELECT value FROM json_each($2))`), updationTime, database.Array(repo.DB,
+		updatedCIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -448,13 +460,13 @@ func (repo *FileRepository) UpdateThumbnail(ctx context.Context, fileID int64, u
 			return stacktrace.Propagate(err, "")
 		}
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE object_keys 
+	_, err = tx.ExecContext(ctx, `UPDATE object_keys
 			SET object_key = $1, size = $2, datacenters = $3 WHERE file_id = $4 AND o_type = $5`,
 		thumbnail.ObjectKey, thumbnailSize, dcsForNewEntry, fileID, ente.THUMBNAIL)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	_, err = applyUsageChange(ctx, tx, userID, usageChange{StorageDelta: usageDiff})
+	_, err = applyUsageChange(ctx, repo.DB, tx, userID, usageChange{StorageDelta: usageDiff})
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -487,8 +499,9 @@ func (repo *FileRepository) GetOwnerID(fileID int64) (int64, error) {
 }
 
 func (repo *FileRepository) GetOwnerToFileCountMap(ctx context.Context, fileIDs []int64) (map[int64]int64, error) {
-	rows, err := repo.DB.QueryContext(ctx, `SELECT owner_id, count(*) FROM files WHERE file_id = ANY($1) group by owner_id`,
-		pq.Array(fileIDs))
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT owner_id, count(*) FROM files WHERE file_id = ANY($1) group by owner_id`, `SELECT owner_id, count(*) FROM files WHERE file_id IN (SELECT value FROM json_each($1)) group by owner_id`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -505,8 +518,9 @@ func (repo *FileRepository) GetOwnerToFileCountMap(ctx context.Context, fileIDs 
 }
 
 func (repo *FileRepository) GetOwnerToFileIDsMap(ctx context.Context, fileIDs []int64) (map[int64][]int64, error) {
-	rows, err := repo.DB.QueryContext(ctx, `SELECT owner_id, file_id FROM files WHERE file_id = ANY($1)`,
-		pq.Array(fileIDs))
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT owner_id, file_id FROM files WHERE file_id = ANY($1)`, `SELECT owner_id, file_id FROM files WHERE file_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -571,9 +585,11 @@ func (repo *FileRepository) GetOwnerAndMagicMetadata(fileID int64, publicMetadat
 }
 
 func (repo *FileRepository) GetSize(userID int64, fileIDs []int64) (int64, error) {
-	row := repo.DB.QueryRow(`
-			SELECT COALESCE(SUM(size), 0) FROM object_keys WHERE o_type = 'file' AND is_deleted = false AND file_id = ANY(SELECT file_id FROM files WHERE (file_id = ANY($1) AND owner_id = $2))`,
-		pq.Array(fileIDs), userID)
+	row := repo.DB.QueryRow(database.SQL(repo.DB,
+		`
+			SELECT COALESCE(SUM(size), 0) FROM object_keys WHERE o_type = 'file' AND is_deleted = false AND file_id = ANY(SELECT file_id FROM files WHERE (file_id = ANY($1) AND owner_id = $2))`, `
+			SELECT COALESCE(SUM(size), 0) FROM object_keys WHERE o_type = 'file' AND is_deleted = false AND file_id IN (SELECT file_id FROM files WHERE (file_id IN (SELECT value FROM json_each($1)) AND owner_id = $2))`), database.Array(repo.DB,
+		fileIDs), userID)
 	var size int64
 	err := row.Scan(&size)
 	if err != nil {
@@ -585,8 +601,8 @@ func (repo *FileRepository) GetSize(userID int64, fileIDs []int64) (int64, error
 func (repo *FileRepository) GetFileCountForUser(userID int64, app ente.App) (int64, error) {
 	row := repo.DB.QueryRow(`SELECT count(distinct files.file_id) AS file_count
 			FROM collection_files
-			JOIN collections c on c.owner_id = $1 and c.collection_id = collection_files.collection_id 
-			JOIN files ON 
+			JOIN collections c on c.owner_id = $1 and c.collection_id = collection_files.collection_id
+			JOIN files ON
 			files.owner_id = $1 AND files.file_id = collection_files.file_id
 			WHERE (c.app = $2 AND collection_files.is_deleted = false)`, userID, app)
 
@@ -634,7 +650,9 @@ func (repo *FileRepository) GetFileAttributesFromObjectKey(objectKey string) (en
 
 func (repo *FileRepository) GetFileAttributesForCopy(fileIDs []int64) ([]ente.File, error) {
 	result := make([]ente.File, 0)
-	rows, err := repo.DB.Query(`SELECT file_id, owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, pub_magic_metadata FROM files WHERE file_id = ANY($1)`, pq.Array(fileIDs))
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`SELECT file_id, owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, pub_magic_metadata FROM files WHERE file_id = ANY($1)`, `SELECT file_id, owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, pub_magic_metadata FROM files WHERE file_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -661,7 +679,9 @@ func (repo *FileRepository) GetFileAttributes(fileID int64) (*ente.File, error) 
 }
 
 func (repo *FileRepository) DropFilesMetadata(ctx context.Context, fileIDs []int64) error {
-	rows, err := repo.DB.QueryContext(ctx, `SELECT distinct(file_id) FROM object_keys WHERE file_id = ANY($1)`, pq.Array(fileIDs))
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`SELECT distinct(file_id) FROM object_keys WHERE file_id = ANY($1)`, `SELECT distinct(file_id) FROM object_keys WHERE file_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		fileIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -678,23 +698,37 @@ func (repo *FileRepository) DropFilesMetadata(ctx context.Context, fileIDs []int
 	if len(fileIdsNotDeleted) > 0 {
 		return stacktrace.Propagate(fmt.Errorf("fileIDs %v are still present in object_keys", fileIdsNotDeleted), "")
 	}
-	_, err = repo.DB.ExecContext(ctx, `
-			UPDATE files SET encrypted_metadata = '-', 
+	_, err = repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+		`
+			UPDATE files SET encrypted_metadata = '-',
 			                 metadata_decryption_header = '-',
-			                 file_decryption_header = '-', 
+			                 file_decryption_header = '-',
 			                 thumbnail_decryption_header = '-',
 			                 magic_metadata = NULL,
 			                 pub_magic_metadata = NULL,
 			                 info = NULL
-             where file_id = ANY($1)`, pq.Array(fileIDs))
+             where file_id = ANY($1)`, `
+			UPDATE files SET encrypted_metadata = '-',
+			                 metadata_decryption_header = '-',
+			                 file_decryption_header = '-',
+			                 thumbnail_decryption_header = '-',
+			                 magic_metadata = NULL,
+			                 pub_magic_metadata = NULL,
+			                 info = NULL
+             where file_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		fileIDs))
 	return stacktrace.Propagate(err, "")
 }
 
 func (repo *FileRepository) GetDuplicateFiles(userID int64) ([]ente.DuplicateFiles, error) {
-	rows, err := repo.DB.Query(`SELECT string_agg(o.file_id::character varying, ','), o.size FROM object_keys o JOIN files f ON f.file_id = o.file_id
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`SELECT string_agg(o.file_id::character varying, ','), o.size FROM object_keys o JOIN files f ON f.file_id = o.file_id
 											WHERE f.owner_id = $1 AND o.o_type = 'file' AND o.is_deleted = false
-											GROUP BY size 
-											HAVING count(*) > 1;`, userID)
+											GROUP BY size
+											HAVING count(*) > 1;`, `SELECT group_concat(o.file_id, ','), o.size FROM object_keys o JOIN files f ON f.file_id = o.file_id
+											WHERE f.owner_id = $1 AND o.o_type = 'file' AND o.is_deleted = false
+											GROUP BY size
+											HAVING count(*) > 1;`), userID)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -779,7 +813,7 @@ func (repo *FileRepository) scheduleDeletion(ctx context.Context, tx *sql.Tx, fi
 		totalObjectSize += object.FileSize
 	}
 	diff = diff - (totalObjectSize)
-	_, err = applyUsageChange(ctx, tx, userID, usageChange{StorageDelta: diff})
+	_, err = applyUsageChange(ctx, repo.DB, tx, userID, usageChange{StorageDelta: diff})
 	return stacktrace.Propagate(err, "")
 }
 
@@ -788,9 +822,11 @@ func (repo *FileRepository) updateUsageForFileCreation(ctx context.Context, tx *
 	if !ok {
 		return -1, stacktrace.Propagate(ente.ErrInvalidApp, "")
 	}
-	return applyUsageChange(ctx, tx, userID, usageChange{
-		StorageDelta:    storageDiff,
-		PhotosFileDelta: photosFileCountDiff,
-		LockerFileDelta: lockerFileCountDiff,
-	})
+	return applyUsageChange(ctx, repo.DB,
+
+		tx, userID, usageChange{
+			StorageDelta:    storageDiff,
+			PhotosFileDelta: photosFileCountDiff,
+			LockerFileDelta: lockerFileCountDiff,
+		})
 }

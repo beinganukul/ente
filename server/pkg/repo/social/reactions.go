@@ -7,8 +7,8 @@ import (
 
 	"github.com/ente/museum/ente"
 	socialentity "github.com/ente/museum/ente/social"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type ReactionsRepository struct {
@@ -17,7 +17,8 @@ type ReactionsRepository struct {
 
 func (repo *ReactionsRepository) Upsert(ctx context.Context, reaction socialentity.Reaction) (string, error) {
 	var id string
-	err := repo.DB.QueryRowContext(ctx, `
+	err := repo.DB.QueryRowContext(ctx, database.SQL(repo.DB,
+		`
         INSERT INTO reactions (id, collection_id, file_id, comment_id, user_id, anon_user_id, cipher, nonce, is_deleted)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
         ON CONFLICT (actor_key, unique_key)
@@ -26,8 +27,16 @@ func (repo *ReactionsRepository) Upsert(ctx context.Context, reaction socialenti
                       is_deleted = FALSE,
                       updated_at = now_utc_micro_seconds()
         RETURNING id
-    `,
-		reaction.ID,
+    `, `
+        INSERT INTO reactions (id, collection_id, file_id, comment_id, user_id, anon_user_id, cipher, nonce, is_deleted)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
+        ON CONFLICT (actor_key, unique_key)
+        DO UPDATE SET cipher = EXCLUDED.cipher,
+                      nonce = EXCLUDED.nonce,
+                      is_deleted = FALSE,
+                      updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+        RETURNING id
+`), reaction.ID,
 		reaction.CollectionID,
 		reaction.FileID,
 		reaction.CommentID,
@@ -47,7 +56,8 @@ func (repo *ReactionsRepository) SoftDeleteByID(ctx context.Context, id string, 
 	if err != nil {
 		return err
 	}
-	result, err := repo.DB.ExecContext(ctx, `
+	result, err := repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+		`
         UPDATE reactions
         SET is_deleted = TRUE,
             cipher = NULL,
@@ -55,7 +65,15 @@ func (repo *ReactionsRepository) SoftDeleteByID(ctx context.Context, id string, 
             updated_at = now_utc_micro_seconds()
         WHERE id = $1
           AND actor_key = $2
-    `, id, actorKey)
+    `, `
+        UPDATE reactions
+        SET is_deleted = TRUE,
+            cipher = NULL,
+            nonce = NULL,
+            updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+        WHERE id = $1
+          AND actor_key = $2
+`), id, actorKey)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -70,7 +88,8 @@ func (repo *ReactionsRepository) SoftDeleteByID(ctx context.Context, id string, 
 }
 
 func (repo *ReactionsRepository) SoftDeleteByCollectionAndUser(ctx context.Context, collectionID int64, userID int64) error {
-	_, err := repo.DB.ExecContext(ctx, `
+	_, err := repo.DB.ExecContext(ctx, database.SQL(repo.DB,
+		`
         UPDATE reactions
         SET is_deleted = TRUE,
             cipher = NULL,
@@ -79,7 +98,16 @@ func (repo *ReactionsRepository) SoftDeleteByCollectionAndUser(ctx context.Conte
         WHERE collection_id = $1
           AND user_id = $2
           AND is_deleted = FALSE
-    `, collectionID, userID)
+    `, `
+        UPDATE reactions
+        SET is_deleted = TRUE,
+            cipher = NULL,
+            nonce = NULL,
+            updated_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+        WHERE collection_id = $1
+          AND user_id = $2
+          AND is_deleted = FALSE
+`), collectionID, userID)
 	return stacktrace.Propagate(err, "")
 }
 
@@ -131,7 +159,8 @@ func (repo *ReactionsRepository) GetByID(ctx context.Context, id string) (*socia
 }
 
 func (repo *ReactionsRepository) GetDiff(ctx context.Context, collectionID int64, since int64, limit int, fileID *int64, commentID *string) ([]socialentity.Reaction, bool, error) {
-	query := `
+	query := database.SQL(repo.DB,
+		`
         SELECT id, collection_id, file_id, comment_id, user_id, anon_user_id, cipher, nonce, is_deleted, created_at, updated_at
         FROM reactions
         WHERE collection_id = $1
@@ -144,7 +173,20 @@ func (repo *ReactionsRepository) GetDiff(ctx context.Context, collectionID int64
           AND ($4::text IS NULL OR comment_id = $4::text)
         ORDER BY updated_at ASC
         LIMIT $5
-    `
+    `, `
+        SELECT id, collection_id, file_id, comment_id, user_id, anon_user_id, cipher, nonce, is_deleted, created_at, updated_at
+        FROM reactions
+        WHERE collection_id = $1
+          AND updated_at > $2
+          AND (
+              $3 IS NULL
+              OR file_id = $3
+              OR comment_id IN (SELECT id FROM comments WHERE collection_id = $1 AND file_id = $3)
+          )
+          AND ($4 IS NULL OR comment_id = $4)
+        ORDER BY updated_at ASC
+        LIMIT $5
+`)
 	rows, err := repo.DB.QueryContext(ctx, query, collectionID, since, fileID, commentID, limit+1)
 	if err != nil {
 		return nil, false, stacktrace.Propagate(err, "")
@@ -210,13 +252,21 @@ func (repo *ReactionsRepository) CountActiveByCollection(ctx context.Context, co
 	if len(collectionIDs) == 0 {
 		return counts, nil
 	}
-	rows, err := repo.DB.QueryContext(ctx, `
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`
         SELECT collection_id, COUNT(*)
         FROM reactions
         WHERE collection_id = ANY($1)
           AND is_deleted = FALSE
         GROUP BY collection_id
-    `, pq.Array(collectionIDs))
+    `, `
+        SELECT collection_id, COUNT(*)
+        FROM reactions
+        WHERE collection_id IN (SELECT value FROM json_each($1))
+          AND is_deleted = FALSE
+        GROUP BY collection_id
+`), database.Array(repo.DB,
+		collectionIDs))
 	if err != nil {
 		return counts, stacktrace.Propagate(err, "")
 	}
@@ -241,12 +291,19 @@ func (repo *ReactionsRepository) LatestUpdateByCollection(ctx context.Context, c
 	if len(collectionIDs) == 0 {
 		return results, nil
 	}
-	rows, err := repo.DB.QueryContext(ctx, `
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`
         SELECT collection_id, MAX(updated_at)
         FROM reactions
         WHERE collection_id = ANY($1)
         GROUP BY collection_id
-    `, pq.Array(collectionIDs))
+    `, `
+        SELECT collection_id, MAX(updated_at)
+        FROM reactions
+        WHERE collection_id IN (SELECT value FROM json_each($1))
+        GROUP BY collection_id
+`), database.Array(repo.DB,
+		collectionIDs))
 	if err != nil {
 		return results, stacktrace.Propagate(err, "")
 	}

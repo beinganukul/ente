@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -38,6 +40,7 @@ var rateLimitRejections = promauto.NewCounterVec(prometheus.CounterOpts{
 }, []string{"scope", "method", "url"})
 
 type RateLimitMiddleware struct {
+	processGlobal      *limiter.Limiter
 	count              int64
 	limit              int64
 	reset              time.Duration
@@ -66,13 +69,17 @@ func NewRateLimitMiddleware(discordCtrl *discord.DiscordController, limit int64,
 		discordCtrl:        discordCtrl,
 		limit:              limit,
 		reset:              reset,
-		ticker:             time.NewTicker(reset),
 	}
-	go func() {
-		for range rl.ticker.C {
-			atomic.StoreInt64(&rl.count, 0)
-		}
-	}()
+	if runtime.GOOS != "js" {
+		rl.ticker = time.NewTicker(reset)
+		go func() {
+			for range rl.ticker.C {
+				atomic.StoreInt64(&rl.count, 0)
+			}
+		}()
+	} else {
+		rl.processGlobal = util.NewRateLimiterForRate(limiter.Rate{Period: reset, Limit: limit})
+	}
 	return rl
 }
 
@@ -82,11 +89,20 @@ func (r *RateLimitMiddleware) Increment() bool {
 }
 
 func (r *RateLimitMiddleware) Stop() {
-	r.ticker.Stop()
+	if r.ticker != nil {
+		r.ticker.Stop()
+	}
 }
 
 func (r *RateLimitMiddleware) GlobalRateLimiter() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if runtime.GOOS == "js" {
+			if r.isRateLimited(c, r.processGlobal, "museum-process-global", processGlobalRateLimitURL, rateLimitScopeProcessGlobal, "Global rate limit") {
+				return
+			}
+			c.Next()
+			return
+		}
 		if !r.Increment() {
 			recordRateLimitRejection(rateLimitScopeProcessGlobal, c.Request.Method, processGlobalRateLimitURL)
 			if r.count%100 == 0 {
@@ -148,6 +164,10 @@ func (r *RateLimitMiddleware) isRateLimited(c *gin.Context, rateLimiter *limiter
 	limitContext, err := rateLimiter.Get(c, key)
 	if err != nil {
 		log.Error("Failed to check rate limit", err)
+		if runtime.GOOS == "js" {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return true
+		}
 		return false
 	}
 	if !limitContext.Reached {
@@ -155,7 +175,7 @@ func (r *RateLimitMiddleware) isRateLimited(c *gin.Context, rateLimiter *limiter
 	}
 	recordRateLimitRejection(scope, c.Request.Method, requestPath)
 	if shouldNotifyPotentialAbuse(scope, requestPath) {
-		go r.discordCtrl.NotifyPotentialAbuse(message)
+		workerjobs.Background(func() { r.discordCtrl.NotifyPotentialAbuse(message) })
 	}
 	log.WithFields(log.Fields{
 		"rate_limit_scope": scope,

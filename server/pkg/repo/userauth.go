@@ -3,9 +3,12 @@ package repo
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
+	"strings"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/pkg/utils/auth"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/network"
 	"github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
@@ -33,7 +36,7 @@ const (
 func (repo *UserAuthRepository) AddOTT(emailHash string, app ente.App, ott string, expirationTime int64) error {
 	_, err := repo.DB.Exec(`INSERT INTO otts(email_hash, ott, creation_time, expiration_time, app)
 				VALUES($1, $2, $3, $4, $5)
-				ON  CONFLICT ON CONSTRAINT unique_otts_emailhash_app_ott DO UPDATE SET creation_time = $3, expiration_time = $4`,
+				ON CONFLICT (email_hash,app,ott) DO UPDATE SET creation_time = $3, expiration_time = $4`,
 		emailHash, ott, time.Microseconds(), expirationTime, app)
 	return stacktrace.Propagate(err, "")
 }
@@ -128,9 +131,12 @@ func (repo *UserAuthRepository) ReserveOTTVerificationAttempt(emailHash string, 
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.Query(`SELECT ott, wrong_attempt FROM otts
+	rows, err := tx.Query(database.SQL(repo.DB,
+		`SELECT ott, wrong_attempt FROM otts
 		WHERE email_hash = $1 AND app = $2 AND expiration_time > $3
-		ORDER BY ott FOR UPDATE`, emailHash, app, time.Microseconds())
+		ORDER BY ott FOR UPDATE`, `SELECT ott, wrong_attempt FROM otts
+		WHERE email_hash = $1 AND app = $2 AND expiration_time > $3
+		ORDER BY ott`), emailHash, app, time.Microseconds())
 	if err != nil {
 		return nil, false, stacktrace.Propagate(err, "")
 	}
@@ -156,8 +162,11 @@ func (repo *UserAuthRepository) ReserveOTTVerificationAttempt(emailHash string, 
 		return otts, limited, nil
 	}
 
-	_, err = tx.Exec(`UPDATE otts SET wrong_attempt = wrong_attempt + 1
-		WHERE email_hash = $1 AND app = $2 AND ott = ANY($3)`, emailHash, app, pq.Array(otts))
+	_, err = tx.Exec(database.SQL(repo.DB,
+		`UPDATE otts SET wrong_attempt = wrong_attempt + 1
+		WHERE email_hash = $1 AND app = $2 AND ott = ANY($3)`, `UPDATE otts SET wrong_attempt = wrong_attempt + 1
+		WHERE email_hash = $1 AND app = $2 AND ott IN (SELECT value FROM json_each($3))`), emailHash, app, database.Array(repo.DB,
+		otts))
 	if err != nil {
 		return nil, false, stacktrace.Propagate(err, "")
 	}
@@ -182,7 +191,7 @@ func (repo *UserAuthRepository) AddLoginResult(ctx context.Context, userID int64
 		return stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	if err = lockUserForLogin(ctx, tx, userID, srpAuth, expectedKeyAttributes); err != nil {
+	if err = lockUserForLogin(ctx, repo.DB, tx, userID, srpAuth, expectedKeyAttributes); err != nil {
 		return err
 	}
 	now := time.Microseconds()
@@ -213,7 +222,7 @@ func (repo *UserAuthRepository) AddTokenForPendingLogin(ctx context.Context, use
 		return stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	if err = lockUserForLogin(ctx, tx, userID, nil, nil); err != nil {
+	if err = lockUserForLogin(ctx, repo.DB, tx, userID, nil, nil); err != nil {
 		return err
 	}
 	now := time.Microseconds()
@@ -242,9 +251,10 @@ func (repo *UserAuthRepository) AddTokenForPendingLogin(ctx context.Context, use
 	return stacktrace.Propagate(tx.Commit(), "")
 }
 
-func lockUserForLogin(ctx context.Context, tx *sql.Tx, userID int64, srpAuth *ente.SRPAuthEntity, expectedKeyAttributes *ente.KeyAttributes) error {
+func lockUserForLogin(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64, srpAuth *ente.SRPAuthEntity, expectedKeyAttributes *ente.KeyAttributes) error {
 	var active bool
-	if err := tx.QueryRowContext(ctx, `SELECT encrypted_email IS NOT NULL FROM users WHERE user_id = $1 FOR NO KEY UPDATE`, userID).Scan(&active); err != nil {
+	if err := tx.QueryRowContext(ctx, database.SQL(db,
+		`SELECT encrypted_email IS NOT NULL FROM users WHERE user_id = $1 FOR NO KEY UPDATE`, `SELECT encrypted_email IS NOT NULL FROM users WHERE user_id = $1`), userID).Scan(&active); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
 	if !active {
@@ -279,16 +289,26 @@ func lockUserForLogin(ctx context.Context, tx *sql.Tx, userID int64, srpAuth *en
 }
 
 func (repo *UserAuthRepository) GetUserIDWithTokenHash(tokenHash []byte, app ente.App) (int64, bool, error) {
-	row := repo.DB.QueryRow(`
-		SELECT 
+	row := repo.DB.QueryRow(database.SQL(repo.DB,
+		`
+		SELECT
 			user_id,
-			CASE 
-				WHEN last_used_at IS NOT NULL AND last_used_at < (now_utc_micro_seconds() - (365::BIGINT * 24 * 60 * 60 * 1000 * 1000)) 
-				THEN true 
-				ELSE false 
+			CASE
+				WHEN last_used_at IS NOT NULL AND last_used_at < (now_utc_micro_seconds() - (365::BIGINT * 24 * 60 * 60 * 1000 * 1000))
+				THEN true
+				ELSE false
 			END as is_expired
-		FROM tokens 
-		WHERE token_hash = $1 AND app = $2 AND is_deleted = false`, tokenHash, app)
+		FROM tokens
+		WHERE token_hash = $1 AND app = $2 AND is_deleted = false`, `
+		SELECT
+			user_id,
+			CASE
+				WHEN last_used_at IS NOT NULL AND last_used_at < (CAST(unixepoch('subsec') * 1000000 AS INTEGER) - (365 * 24 * 60 * 60 * 1000 * 1000))
+				THEN true
+				ELSE false
+			END as is_expired
+		FROM tokens
+		WHERE token_hash = $1 AND app = $2 AND is_deleted = false`), tokenHash, app)
 	var id int64
 	var isExpired bool
 	err := row.Scan(&id, &isExpired)
@@ -331,9 +351,9 @@ func (repo *UserAuthRepository) RemoveTokensForApps(userID int64, apps []ente.Ap
 	for _, app := range apps {
 		dbApps = append(dbApps, string(app))
 	}
-	return repo.markTokensDeleted(
-		`UPDATE tokens SET is_deleted = true WHERE user_id = $1 AND app = ANY($2) AND is_deleted = false RETURNING app, token_hash`,
-		userID, pq.Array(dbApps),
+	return repo.markTokensDeleted(database.SQL(repo.DB,
+		`UPDATE tokens SET is_deleted = true WHERE user_id = $1 AND app = ANY($2) AND is_deleted = false RETURNING app, token_hash`, `UPDATE tokens SET is_deleted = true WHERE user_id = $1 AND app IN (SELECT value FROM json_each($2)) AND is_deleted = false RETURNING app, token_hash`), userID, database.Array(repo.DB,
+		dbApps),
 	)
 }
 
@@ -343,7 +363,9 @@ func (repo *UserAuthRepository) markTokensDeleted(query string, args ...interfac
 		return nil, stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-	tokens, err := markTokensDeleted(tx, query, args...)
+	tokens, err := markTokensDeleted(repo.DB,
+
+		tx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +375,7 @@ func (repo *UserAuthRepository) markTokensDeleted(query string, args ...interfac
 	return tokens, nil
 }
 
-func markTokensDeleted(tx *sql.Tx, query string, args ...interface{}) ([]RevokedToken, error) {
+func markTokensDeleted(db *sql.DB, tx *sql.Tx, query string, args ...interface{}) ([]RevokedToken, error) {
 	rows, err := tx.Query(query, args...)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
@@ -373,7 +395,17 @@ func markTokensDeleted(tx *sql.Tx, query string, args ...interface{}) ([]Revoked
 	if err = rows.Err(); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
-	if _, err = tx.Exec(`DELETE FROM push_tokens WHERE session_token_hash = ANY($1)`, hashes); err != nil {
+	if _, err = tx.Exec(database.SQL(db,
+		`DELETE FROM push_tokens WHERE session_token_hash = ANY($1)`, `DELETE FROM push_tokens WHERE hex(session_token_hash) IN (SELECT value FROM json_each($1))`), func() any {
+		if database.IsTurso(db) {
+			hs := make([]string, len(hashes))
+			for i, h := range hashes {
+				hs[i] = strings.ToUpper(hex.EncodeToString(h))
+			}
+			return database.Array(db, hs)
+		}
+		return hashes
+	}()); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
 	return tokens, nil

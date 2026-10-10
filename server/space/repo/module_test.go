@@ -13,6 +13,7 @@ import (
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/internal/testutil"
+	"github.com/ente/museum/pkg/utils/database"
 	timeutil "github.com/ente/museum/pkg/utils/time"
 	"github.com/stretchr/testify/require"
 )
@@ -267,11 +268,16 @@ func TestCreatePostEnforcesSpacePostLimit(t *testing.T) {
 	space, err := testCreateSpace(ctx, module, userID, "post_limit", "root", "public", "secret", "nonce", "profile")
 	require.NoError(t, err)
 
-	_, err = module.Posts.DB.ExecContext(ctx, `
+	_, err = module.Posts.DB.ExecContext(ctx, database.SQL(module.Spaces.DB, `
 		INSERT INTO space_posts (space_id, encrypted_post_key, key_version)
 		SELECT $1, 'post-key', $2
 		FROM generate_series(1, $3)
-	`, space.SpaceID, space.CurrentVersion, MaxPostsPerSpace)
+	`, `WITH RECURSIVE series(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM series WHERE value < $3)
+
+		INSERT INTO space_posts (space_id, encrypted_post_key, key_version)
+		SELECT $1, CAST('post-key' AS BLOB), $2
+		FROM series
+	`), space.SpaceID, space.CurrentVersion, MaxPostsPerSpace)
 	require.NoError(t, err)
 
 	_, postCount, err := module.Posts.CreatePost(ctx, space.SpaceID, testSpaceBytes("post-key"), nil, space.CurrentVersion, nil, "")
@@ -305,7 +311,7 @@ func TestCreateMessageEnforcesSenderLimit(t *testing.T) {
 	bobSpace, err := testCreateSpace(ctx, module, bobID, "message_limit_bob", "root", "public", "secret", "nonce", "profile")
 	require.NoError(t, err)
 
-	_, err = module.Messages.DB.ExecContext(ctx, `
+	_, err = module.Messages.DB.ExecContext(ctx, database.SQL(module.Spaces.DB, `
 		INSERT INTO space_messages (
 			message_id,
 			sender_space_id,
@@ -317,7 +323,20 @@ func TestCreateMessageEnforcesSenderLimit(t *testing.T) {
 		)
 		SELECT 'message-limit-' || value, $1, $2, 'regular', $3, $4, $5
 		FROM generate_series(1, $6) AS value
-	`, aliceSpace.SpaceID, bobSpace.SpaceID, testSpaceBytes("cipher"), testSpaceBytes("sender-key"), testSpaceBytes("recipient-key"), MaxActiveMessagesSentPerSpace)
+	`, `WITH RECURSIVE series(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM series WHERE value < $6)
+
+		INSERT INTO space_messages (
+			message_id,
+			sender_space_id,
+			recipient_space_id,
+			kind,
+			message_cipher,
+			sender_encrypted_message_key,
+			recipient_encrypted_message_key
+		)
+		SELECT 'message-limit-' || value, $1, $2, 'regular', $3, $4, $5
+		FROM series
+	`), aliceSpace.SpaceID, bobSpace.SpaceID, testSpaceBytes("cipher"), testSpaceBytes("sender-key"), testSpaceBytes("recipient-key"), MaxActiveMessagesSentPerSpace)
 	require.NoError(t, err)
 
 	input := CreateSpaceMessageRecord{
@@ -345,6 +364,33 @@ func TestCreateMessageEnforcesSenderLimit(t *testing.T) {
 
 func insertPendingFriendRequests(t *testing.T, module *Module, fixedSpaceID string, fixedSpaceIsRequester bool) (string, int64) {
 	t.Helper()
+
+	if database.IsTurso(module.Spaces.DB) {
+		tx, err := module.Spaces.DB.BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		defer tx.Rollback()
+		var firstPeer string
+		var firstRequest int64
+		for i := 1; i <= MaxPendingFriendRequestsPerSpace; i++ {
+			var userID int64
+			email := "friend-request-limit-" + strconv.Itoa(i) + "@example.com"
+			require.NoError(t, tx.QueryRow(`INSERT INTO users (encrypted_email, email_decryption_nonce, email_hash, creation_time) VALUES ($1, $2, $3, 1) RETURNING user_id`, []byte(email), []byte{0}, email).Scan(&userID))
+			peer := "friend_request_limit_" + strconv.FormatInt(userID, 10)
+			_, err := tx.Exec(`INSERT INTO spaces (space_id, owner_id, space_slug, root_wrapped_space_key, public_key, encrypted_secret_key) VALUES ($1, $2, $1, $3, $3, $3)`, peer, userID, []byte{0})
+			require.NoError(t, err)
+			requester, target := peer, fixedSpaceID
+			if fixedSpaceIsRequester {
+				requester, target = fixedSpaceID, peer
+			}
+			var requestID int64
+			require.NoError(t, tx.QueryRow(`INSERT INTO space_friend_requests (requester_space_id, target_space_id, requester_friend_sealed_space_key, requester_key_version) VALUES ($1, $2, $3, 1) RETURNING request_id`, requester, target, []byte{0}).Scan(&requestID))
+			if i == 1 {
+				firstPeer, firstRequest = peer, requestID
+			}
+		}
+		require.NoError(t, tx.Commit())
+		return firstPeer, firstRequest
+	}
 
 	var peerSpaceID string
 	var firstRequestID int64
@@ -577,10 +623,14 @@ func TestExchangeBrowserSessionConsumesTokenOnce(t *testing.T) {
 	userID := insertSpaceUser(t, module, "browser-session-exchange@example.com", "browser-session-exchange-public")
 	authToken := "browser-session-exchange-token"
 	authTokenHash := sha256.Sum256([]byte(authToken))
+	var authTokenValue any = authToken
+	if database.IsTurso(module.Sessions.DB) {
+		authTokenValue = nil
+	}
 	_, err := module.Sessions.DB.Exec(`
-		INSERT INTO tokens (user_id, token, creation_time, app)
-		VALUES ($1, $2, $3, 'photos')
-	`, userID, authToken, timeutil.Microseconds())
+		INSERT INTO tokens (user_id, token, creation_time, app, token_hash)
+		VALUES ($1, $2, $3, 'photos', $4)
+	`, userID, authTokenValue, timeutil.Microseconds(), authTokenHash[:])
 	require.NoError(t, err)
 
 	start := make(chan struct{})
@@ -615,11 +665,15 @@ func TestExchangeBrowserSessionKeepsTokenWhenSessionCreationFails(t *testing.T) 
 	userID := insertSpaceUser(t, module, "browser-session-rollback@example.com", "browser-session-rollback-public")
 	authToken := "browser-session-rollback-token"
 	authTokenHash := sha256.Sum256([]byte(authToken))
+	var authTokenValue any = authToken
+	if database.IsTurso(module.Sessions.DB) {
+		authTokenValue = nil
+	}
 	tokenHash := []byte("duplicate-space-token-hash")
 	_, err := module.Sessions.DB.Exec(`
-		INSERT INTO tokens (user_id, token, creation_time, app)
-		VALUES ($1, $2, $3, 'photos')
-	`, userID, authToken, timeutil.Microseconds())
+		INSERT INTO tokens (user_id, token, creation_time, app, token_hash)
+		VALUES ($1, $2, $3, 'photos', $4)
+	`, userID, authTokenValue, timeutil.Microseconds(), authTokenHash[:])
 	require.NoError(t, err)
 	require.NoError(t, module.Sessions.CreateBrowserSession(ctx, tokenHash, userID, "existing-wrap-key", timeutil.NDaysFromNow(1)))
 
@@ -707,7 +761,7 @@ func TestSpaceAccountDeletionDeleteUserData(t *testing.T) {
 	_, err = module.Posts.DB.Exec(`
 		INSERT INTO space_post_assets (post_id, object_key, bucket_id, size, position, metadata_cipher)
 		VALUES ($1, $2, $3, 33, 0, $4)
-	`, postID, "space/alice/post-asset", "hot", "metadata")
+	`, postID, "space/alice/post-asset", "hot", []byte("metadata"))
 	require.NoError(t, err)
 	require.NoError(t, module.Assets.AddTempObject(ctx, SpaceTempObjectRecord{
 		ObjectKey:    "space/alice/staged-upload",
@@ -761,13 +815,19 @@ func TestSpaceAccountDeletionDeleteUserData(t *testing.T) {
 	require.Equal(t, int64(0), countSpaceRows(t, module, `SELECT COUNT(*) FROM space_notification_read_markers WHERE viewer_space_id = $1 OR friend_space_id = $1`, aliceSpace.SpaceID))
 
 	for _, objectKey := range []string{ProfileAssetObjectKey(aliceSpace.SpaceID, ProfileAssetTypeAvatar, "avatar"), ProfileAssetObjectKey(aliceSpace.SpaceID, ProfileAssetTypeCover, "cover"), "space/alice/post-asset", "space/alice/staged-upload"} {
-		require.Equal(t, int64(1), countSpaceRows(t, module, `
+		require.Equal(t, int64(1), countSpaceRows(t, module, database.SQL(module.Spaces.DB, `
 			SELECT COUNT(*)
 			FROM space_temp_objects
 			WHERE object_key = $1
 			  AND space_id IS NULL
 			  AND cleanup_after >= now_utc_micro_seconds() + $2
-		`, objectKey, SpaceUploadURLExpiry.Microseconds()))
+		`, `
+			SELECT COUNT(*)
+			FROM space_temp_objects
+			WHERE object_key = $1
+			  AND space_id IS NULL
+			  AND cleanup_after >= CAST(unixepoch('subsec') * 1000000 AS INTEGER) + $2
+		`), objectKey, SpaceUploadURLExpiry.Microseconds()))
 	}
 }
 
@@ -984,7 +1044,7 @@ func TestSpaceMessageConversationsUseLatestActivity(t *testing.T) {
 	_, err = module.Posts.DB.Exec(`
 			INSERT INTO space_post_assets (post_id, object_key, bucket_id, metadata_cipher)
 			VALUES ($1, $2, $3, $4)
-		`, postID, "activity-post-object", "bucket", "metadata")
+		`, postID, "activity-post-object", "bucket", []byte("metadata"))
 	require.NoError(t, err)
 	require.NoError(t, testSetPostLike(ctx, module, postID, bobSpace.SpaceID, true))
 	setPostLikeCreatedAt(t, module, 4000, postID, bobSpace.SpaceID)
@@ -1745,12 +1805,12 @@ func TestPostAssetPositionIsUnique(t *testing.T) {
 	_, err = module.Posts.DB.Exec(`
 			INSERT INTO space_post_assets (post_id, object_key, bucket_id, position, metadata_cipher)
 			VALUES ($1, $2, $3, $4, $5)
-		`, postID, "space/alice-assets/post/full-1", "b2-eu-cen", 0, "metadata-1")
+		`, postID, "space/alice-assets/post/full-1", "b2-eu-cen", 0, []byte("metadata-1"))
 	require.NoError(t, err)
 	_, err = module.Posts.DB.Exec(`
 			INSERT INTO space_post_assets (post_id, object_key, bucket_id, position, metadata_cipher)
 			VALUES ($1, $2, $3, $4, $5)
-		`, postID, "space/alice-assets/post/full-2", "b2-eu-cen", 0, "metadata-2")
+		`, postID, "space/alice-assets/post/full-2", "b2-eu-cen", 0, []byte("metadata-2"))
 
 	require.Error(t, err)
 }
@@ -2479,7 +2539,7 @@ func TestUnreadNotificationsTrackReadableActivityWithoutChangingLatestPreview(t 
 	_, err = module.Posts.DB.Exec(`
 			INSERT INTO space_post_assets (post_id, object_key, bucket_id, metadata_cipher)
 			VALUES ($1, $2, $3, $4)
-		`, bobPostID, "bob-post-object", "bucket", "metadata")
+		`, bobPostID, "bob-post-object", "bucket", []byte("metadata"))
 	require.NoError(t, err)
 	require.NoError(t, testSetPostLike(ctx, module, alicePostID, bobSpace.SpaceID, true))
 	setPostLikeCreatedAt(t, module, 3000, alicePostID, bobSpace.SpaceID)
@@ -2610,14 +2670,21 @@ func requireQueuedTempObject(t *testing.T, module *Module, objectKey, purpose, b
 	t.Helper()
 	var gotPurpose, gotBucketID string
 	var expired, cleanupDelayed bool
-	err := module.Assets.DB.QueryRow(`
+	err := module.Assets.DB.QueryRow(database.SQL(module.Spaces.DB, `
 		SELECT purpose,
 		       bucket_id,
 		       expires_at <= now_utc_micro_seconds(),
 		       cleanup_after >= now_utc_micro_seconds() + $2
 		FROM space_temp_objects
 		WHERE object_key = $1
-	`, objectKey, SpaceUploadURLExpiry.Microseconds()).Scan(&gotPurpose, &gotBucketID, &expired, &cleanupDelayed)
+	`, `
+		SELECT purpose,
+		       bucket_id,
+		       expires_at <= CAST(unixepoch('subsec') * 1000000 AS INTEGER),
+		       cleanup_after >= CAST(unixepoch('subsec') * 1000000 AS INTEGER) + $2
+		FROM space_temp_objects
+		WHERE object_key = $1
+	`), objectKey, SpaceUploadURLExpiry.Microseconds()).Scan(&gotPurpose, &gotBucketID, &expired, &cleanupDelayed)
 	require.NoError(t, err)
 	require.Equal(t, purpose, gotPurpose)
 	require.Equal(t, bucketID, gotBucketID)

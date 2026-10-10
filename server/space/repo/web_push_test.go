@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/ente/museum/pkg/utils/database"
 	timeutil "github.com/ente/museum/pkg/utils/time"
 	"github.com/stretchr/testify/require"
 )
@@ -237,7 +238,7 @@ func TestWebPushLinkSubscriptionLimit(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = module.WebPush.DB.Exec(`
+	_, err = module.WebPush.DB.Exec(database.SQL(module.Spaces.DB, `
 		INSERT INTO space_web_push_subscriptions (
 			target_id, endpoint, link_id, p256dh, auth
 		)
@@ -248,7 +249,19 @@ func TestWebPushLinkSubscriptionLimit(t *testing.T) {
 			'p256dh',
 			'auth'
 		FROM generate_series(1, $2) value
-	`, link.LinkID, spaceWebPushLinkSubscriptionLimit)
+	`, `WITH RECURSIVE series(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM series WHERE value < $2)
+
+		INSERT INTO space_web_push_subscriptions (
+			target_id, endpoint, link_id, p256dh, auth
+		)
+		SELECT
+			'wpt_limit_' || value,
+			'https://push.example/limit/' || value,
+			$1,
+			'p256dh',
+			'auth'
+		FROM series
+	`), link.LinkID, spaceWebPushLinkSubscriptionLimit)
 	require.NoError(t, err)
 
 	_, err = module.WebPush.UpsertLinkSubscription(

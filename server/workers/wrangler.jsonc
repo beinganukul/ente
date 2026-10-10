@@ -1,0 +1,11 @@
+{
+  "name": "ente-museum",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "build": { "command": "npm run build" },
+  "durable_objects": { "bindings": [{ "name": "MUSEUM", "class_name": "Museum" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Museum"] }]
+}

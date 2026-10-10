@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/database"
 
 	"github.com/ente/museum/ente"
-	"github.com/lib/pq"
 
 	"github.com/ente/stacktrace"
 )
@@ -38,11 +38,8 @@ func (r *Repository) insertOrUpdate(ctx context.Context, userID int64, key strin
 	)
 
 	if err != nil {
-		var pgErr *pq.Error
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			if pgErr.Constraint == "remote_store_custom_domain_unique_idx" || pgErr.Constraint == "remote_store_custom_domain_canonical_unique_idx" {
-				return ente.NewConflictError("custom domain already exists for another user")
-			}
+		if database.IsUniqueViolation(err) {
+			return ente.NewConflictError("custom domain already exists for another user")
 		}
 		return stacktrace.Propagate(err, "failed to insert/update")
 	}

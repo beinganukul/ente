@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ente/stacktrace"
 	"github.com/sirupsen/logrus"
 )
@@ -29,12 +30,12 @@ func (c *Controller) LeaveFamily(ctx context.Context, userID int64) error {
 	if err = c.clearFamilyCustomDomain(ctx, userID); err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	go func() {
+	workerjobs.Background(func() {
 		notificationErr := c.sendNotification(ctx, *user.FamilyAdminID, userID, ente.LEFT, nil)
 		if notificationErr != nil {
 			logrus.WithError(notificationErr).Error("family-plan: left notification failed")
 		}
-	}()
+	})
 	return nil
 }
 
@@ -82,12 +83,12 @@ func (c *Controller) AcceptInvite(ctx context.Context, token string) (ente.Accep
 			if err != nil {
 				return ente.AcceptInviteResponse{}, stacktrace.Propagate(err, "")
 			}
-			go func() {
+			workerjobs.Background(func() {
 				notificationErr := c.sendNotification(ctx, familyMember.AdminUserID, familyMember.MemberUserID, ente.ACCEPTED, nil)
 				if notificationErr != nil {
 					logrus.WithError(notificationErr).Error("family-plan: accepted notification failed")
 				}
-			}()
+			})
 		} else {
 			return ente.AcceptInviteResponse{}, stacktrace.Propagate(ente.ErrInvalidPassword, "invited state is not valid any more: %s ", familyMember.Status)
 		}

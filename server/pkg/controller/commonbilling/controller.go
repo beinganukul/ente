@@ -2,6 +2,7 @@ package commonbilling
 
 import (
 	"context"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 
 	"github.com/ente/museum/pkg/controller/email"
 	"github.com/ente/museum/pkg/repo"
@@ -75,6 +76,6 @@ func (c *Controller) OnSubscriptionCancelled(userID int64) error {
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
-	go c.EmailNotificationController.OnSubscriptionCancelled(userID)
+	workerjobs.Background(func() { c.EmailNotificationController.OnSubscriptionCancelled(userID) })
 	return nil
 }

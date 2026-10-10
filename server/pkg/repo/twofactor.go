@@ -84,7 +84,7 @@ func (repo *TwoFactorRepository) VerifyTwoFactorSecret(userID int64, secretHash 
 }
 
 func (repo *TwoFactorRepository) SetTempTwoFactorSecret(userID int64, secret ente.EncryptionResult, secretHash string, expirationTime int64) error {
-	_, err := repo.DB.Exec(`INSERT INTO temp_two_factor(user_id, encrypted_two_factor_secret, two_factor_secret_decryption_nonce, two_factor_secret_hash, creation_time, expiration_time) 
+	_, err := repo.DB.Exec(`INSERT INTO temp_two_factor(user_id, encrypted_two_factor_secret, two_factor_secret_decryption_nonce, two_factor_secret_hash, creation_time, expiration_time)
 		VALUES($1, $2, $3, $4, $5, $6)`,
 		userID, secret.Cipher, secret.Nonce, secretHash, time.Microseconds(), expirationTime)
 	return stacktrace.Propagate(err, "")

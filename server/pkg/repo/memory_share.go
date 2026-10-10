@@ -6,9 +6,9 @@ import (
 	"fmt"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 	"github.com/spf13/viper"
 )
 
@@ -44,7 +44,7 @@ func (r *MemoryShareRepository) Create(ctx context.Context, share ente.MemorySha
 		share.EncryptedKey, share.KeyDecryptionNonce, share.AccessToken,
 		false, now, now).Scan(&share.ID)
 	if err != nil {
-		if pgErr, ok := err.(*pq.Error); ok && pgErr.Code == "23505" {
+		if database.IsUniqueViolation(err) {
 			return share, ente.ErrAccessTokenInUse
 		}
 		return share, stacktrace.Propagate(err, "failed to insert memory share")
@@ -75,7 +75,7 @@ func (r *MemoryShareRepository) CreateWithFiles(ctx context.Context, share ente.
 		share.EncryptedKey, share.KeyDecryptionNonce, share.AccessToken,
 		false, now, now).Scan(&share.ID)
 	if err != nil {
-		if pgErr, ok := err.(*pq.Error); ok && pgErr.Code == "23505" {
+		if database.IsUniqueViolation(err) {
 			return share, ente.ErrAccessTokenInUse
 		}
 		return share, stacktrace.Propagate(err, "failed to insert memory share")
@@ -308,11 +308,17 @@ func (r *MemoryShareRepository) FileExistsInShare(ctx context.Context, shareID i
 }
 
 func (r *MemoryShareRepository) GetFilesWithKeys(ctx context.Context, shareID int64, fileIDs []int64) ([]ente.MemoryShareFile, error) {
-	rows, err := r.DB.QueryContext(ctx, `
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB,
+		`
 		SELECT id, memory_share_id, file_id, file_owner_id, position, file_enc_key, file_key_decryption_nonce, created_at
 		FROM memory_share_files
 		WHERE memory_share_id = $1 AND file_id = ANY($2)
-		ORDER BY position ASC, id ASC`, shareID, pq.Array(fileIDs))
+		ORDER BY position ASC, id ASC`, `
+		SELECT id, memory_share_id, file_id, file_owner_id, position, file_enc_key, file_key_decryption_nonce, created_at
+		FROM memory_share_files
+		WHERE memory_share_id = $1 AND file_id IN (SELECT value FROM json_each($2))
+		ORDER BY position ASC, id ASC`), shareID, database.Array(r.DB,
+		fileIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to query files with keys")
 	}

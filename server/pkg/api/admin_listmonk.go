@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"net/http"
 	"strconv"
 	"strings"
@@ -172,7 +173,7 @@ func (h *AdminHandler) GetListmonkMissingSubscribersCount(c *gin.Context) {
 		TargetListIDSet:    targetListSet,
 	}
 
-	go h.runListminkMissingSubscribersJobAsync(logger, jobConfig)
+	workerjobs.Background(func() { h.runListminkMissingSubscribersJobAsync(logger, jobConfig) })
 
 	responsePayload := gin.H{
 		"status":             "started",

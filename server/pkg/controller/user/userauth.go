@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"net/http"
 	"strings"
 	t "time"
@@ -119,13 +120,13 @@ func (c *UserController) SendEmailOTT(context *gin.Context, email string, purpos
 		alertMsg := fmt.Sprintf("Too many OTT requests for %s in %d minutes",
 			emailUtil.GetMaskedEmailWithHint(email),
 			OTTValidityDurationInMicroSeconds/(60*1000000))
-		go c.DiscordController.NotifyPotentialAbuse(alertMsg)
+		workerjobs.Background(func() { c.DiscordController.NotifyPotentialAbuse(alertMsg) })
 		return stacktrace.Propagate(ente.ErrTooManyBadRequest, "too many OTT requests")
 	}
 
 	decision := c.OTTSendLimiter.Allow(network.GetClientIP(context))
 	if decision.alert != "" {
-		go c.DiscordController.NotifyPotentialAbuse(decision.alert)
+		workerjobs.Background(func() { c.DiscordController.NotifyPotentialAbuse(decision.alert) })
 	}
 	if !decision.allowed {
 		return stacktrace.Propagate(ente.ErrTooManyBadRequest, "too many OTT requests")
@@ -223,7 +224,7 @@ func (c *UserController) shouldSwallowSendOTTDisclosureError(ctx *gin.Context) b
 		return false
 	}
 	if c.DiscordController != nil {
-		go c.DiscordController.NotifyPotentialAbuse("swallowing send-ott disclosure error")
+		workerjobs.Background(func() { c.DiscordController.NotifyPotentialAbuse("swallowing send-ott disclosure error") })
 	}
 	return true
 }
@@ -275,7 +276,7 @@ func (c *UserController) verifyEmailOtt(context *gin.Context, email string, ott 
 	}
 	if limited {
 		msg := fmt.Sprintf("Too many wrong ott verification attemp for app %s", app)
-		go c.DiscordController.NotifyPotentialAbuse(msg)
+		workerjobs.Background(func() { c.DiscordController.NotifyPotentialAbuse(msg) })
 		return stacktrace.Propagate(ente.ErrTooManyBadRequest, "User needs to wait before active ott are expired")
 	}
 	if len(otts) < 1 {
@@ -362,7 +363,7 @@ func (c *UserController) UpdateEmail(ctx *gin.Context, userID int64, email strin
 	}
 
 	// Mailing list failures must not block email changes.
-	go func() {
+	workerjobs.Background(func() {
 		if err := c.MailingListsController.Unsubscribe(oldEmail); err != nil {
 			log.WithError(err).WithFields(log.Fields{
 				"user_id": userID,
@@ -375,7 +376,7 @@ func (c *UserController) UpdateEmail(ctx *gin.Context, userID int64, email strin
 				"email":   email,
 			}).Error("mailing list subscribe failed")
 		}
-	}()
+	})
 
 	return nil
 }
@@ -493,7 +494,7 @@ func (c *UserController) notifyLogin(ctx *gin.Context, userID int64, app ente.Ap
 	}
 
 	clientPackage := ctx.GetHeader("X-Client-Package")
-	go func() {
+	workerjobs.Background(func() {
 		user, userErr := c.UserRepo.GetUserByIDInternal(userID)
 		if userErr != nil {
 			log.WithError(userErr).Error("Failed to get user")
@@ -529,7 +530,7 @@ func (c *UserController) notifyLogin(ctx *gin.Context, userID int64, app ente.Ap
 		if emailSendErr != nil {
 			log.WithError(emailSendErr).Error("Failed to send email")
 		}
-	}()
+	})
 	return nil
 }
 

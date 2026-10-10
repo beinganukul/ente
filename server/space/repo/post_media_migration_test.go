@@ -4,18 +4,22 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPostMediaMigrationPreservesPhotos(t *testing.T) {
 	module := newSpaceTestModule(t)
+	if database.IsTurso(module.Posts.DB) {
+		t.Skip("PostgreSQL historical migration; SQLite starts from the current baseline")
+	}
 	ctx := t.Context()
 	ownerID := insertSpaceUser(t, module, "media-migration@example.com", "public")
 	space, err := testCreateSpace(ctx, module, ownerID, "media_migration", "root", "public", "secret", "nonce", "profile")
 	require.NoError(t, err)
-	up, err := os.ReadFile("migrations/148_space_post_video.up.sql")
+	up, err := os.ReadFile("migrations/postgres/148_space_post_video.up.sql")
 	require.NoError(t, err)
-	down, err := os.ReadFile("migrations/148_space_post_video.down.sql")
+	down, err := os.ReadFile("migrations/postgres/148_space_post_video.down.sql")
 	require.NoError(t, err)
 	tx, err := module.Posts.DB.BeginTx(ctx, nil)
 	require.NoError(t, err)

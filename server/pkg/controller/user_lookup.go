@@ -3,6 +3,7 @@ package controller
 import (
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"strconv"
 
 	"github.com/ente/museum/ente"
@@ -96,9 +97,11 @@ func (c *UserLookupController) lookupUserID(
 
 func (c *UserLookupController) limitExceeded(decision userLookupLimitDecision) error {
 	if decision.notify && c.notifier != nil {
-		go c.notifier.NotifyPotentialAbuse(
-			"user lookup limit exceeded (" + string(decision.window) + " window)",
-		)
+		workerjobs.Background(func() {
+			c.notifier.NotifyPotentialAbuse(
+				"user lookup limit exceeded (" + string(decision.window) + " window)",
+			)
+		})
 	}
 	return stacktrace.Propagate(ente.ErrTooManyBadRequest, "too many user lookups")
 }

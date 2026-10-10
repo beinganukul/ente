@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 
 	"github.com/ente/museum/ente"
 	enteJWT "github.com/ente/museum/ente/jwt"
@@ -41,7 +42,9 @@ func (c *UserController) GetDeleteChallengeToken(ctx *gin.Context) (*ente.Delete
 	*/
 	shouldNotifyDiscord := err == nil && subscription.ProductID != ente.FreePlanProductID
 	if shouldNotifyDiscord {
-		go c.DiscordController.NotifyAccountDelete(user.ID, string(subscription.PaymentProvider), subscription.ProductID)
+		workerjobs.Background(func() {
+			c.DiscordController.NotifyAccountDelete(user.ID, string(subscription.PaymentProvider), subscription.ProductID)
+		})
 	}
 	token, err := c.GetJWTToken(userID, enteJWT.DELETE_ACCOUNT)
 	if err != nil {

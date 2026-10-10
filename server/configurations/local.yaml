@@ -117,6 +117,13 @@ space:
 
 # Database connection parameters
 db:
+    # Defaults to postgres. Turso connections can currently be checked with
+    # go run ./cmd/database; Museum's repository port is still in progress.
+    provider: postgres
+    turso:
+        url:
+        # Alternatively set ENTE_DB_TURSO_AUTH_TOKEN.
+        auth-token:
     host: localhost
     port: 5432
     name: ente_db

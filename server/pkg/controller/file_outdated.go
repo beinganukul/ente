@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"sync"
 
 	"github.com/ente/museum/pkg/repo"
@@ -46,7 +47,7 @@ func (c *FileController) CleanupOutdatedObjects() {
 }
 
 func (c *FileController) prepareOutdatedObjectsForDeletion(ctx context.Context) {
-	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.OutdatedObjectsQueue, outdatedObjectBatchSize)
+	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.OutdatedObjectsQueue, workerjobs.BatchSize(outdatedObjectBatchSize, 1))
 	if err != nil {
 		log.WithError(err).Error("Failed to fetch outdated objects from queue")
 		return
@@ -114,7 +115,7 @@ func (c *FileController) prepareOutdatedObjectsForDeletion(ctx context.Context) 
 }
 
 func (c *FileController) deleteReadyOutdatedObjects(ctx context.Context) {
-	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.DeleteOutdatedObjectQueue, outdatedObjectBatchSize)
+	items, err := c.QueueRepo.GetItemsReadyForDeletion(repo.DeleteOutdatedObjectQueue, workerjobs.BatchSize(outdatedObjectBatchSize, 1))
 	if err != nil {
 		log.WithError(err).Error("Failed to fetch outdated objects ready for deletion")
 		return

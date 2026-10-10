@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ente/museum/ente/base"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -28,12 +29,17 @@ func (r *SpacesRepository) CreateSpace(ctx context.Context, ownerID int64, space
 	defer tx.Rollback()
 
 	var lockedOwnerID int64
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT user_id
 		FROM users
 		WHERE user_id = $1
 		FOR UPDATE
-	`, ownerID).Scan(&lockedOwnerID); err != nil {
+	`, `
+		SELECT user_id
+		FROM users
+		WHERE user_id = $1
+
+	`), ownerID).Scan(&lockedOwnerID); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
 	var spaceCount int
@@ -151,18 +157,23 @@ func (r *SpacesRepository) UpdateProfile(ctx context.Context, spaceID string, ke
 	}
 	defer tx.Rollback()
 	var currentVersion int
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
 		SELECT current_version
 		FROM spaces
 		WHERE space_id = $1
 		FOR UPDATE
-	`, spaceID).Scan(&currentVersion); err != nil {
+	`, `
+		SELECT current_version
+		FROM spaces
+		WHERE space_id = $1
+
+	`), spaceID).Scan(&currentVersion); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
 	if currentVersion != keyVersion {
 		return nil, sql.ErrNoRows
 	}
-	previousAssets, err := getProfileAssetsForUpdateTx(ctx, tx, spaceID)
+	previousAssets, err := getProfileAssetsForUpdateTx(ctx, r.DB, tx, spaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -206,23 +217,29 @@ func (r *SpacesRepository) UpdateSlug(ctx context.Context, spaceID, spaceSlug st
 	if err != nil {
 		return nil, err
 	}
-	rec, err := scanSpaceRecord(r.DB.QueryRowContext(ctx, `
-		WITH updated AS (
-			UPDATE spaces
-			SET space_slug = $1
-			WHERE space_id = $2
-			RETURNING space_id
-		)
-		SELECT `+spaceRecordSelectColumns+`
-		FROM spaces s
-		JOIN updated u ON u.space_id = s.space_id
-		`+spaceRecordProfileAssetJoins+`
-	`, normalizedSpaceSlug, spaceID))
+	// Read after the update so PostgreSQL also returns the new slug rather than the CTE snapshot.
+	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "duplicate key value") {
-			return nil, wrapUnique(err, "space slug already exists")
-		}
+		return nil, stacktrace.Propagate(err, "")
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE spaces SET space_slug = $1 WHERE space_id = $2`, normalizedSpaceSlug, spaceID)
+	if err != nil {
+		return nil, wrapUnique(err, "space slug already exists")
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return nil, stacktrace.Propagate(err, "")
+	}
+	if count == 0 {
+		return nil, sql.ErrNoRows
+	}
+	rec, err := scanSpaceRecord(tx.QueryRowContext(ctx, `SELECT `+spaceRecordSelectColumns+` FROM spaces s `+spaceRecordProfileAssetJoins+` WHERE s.space_id = $1`, spaceID))
+	if err != nil {
 		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, stacktrace.Propagate(err, "")
 	}
 	return rec, nil
 }
@@ -234,7 +251,7 @@ func (r *SpacesRepository) RotateKey(ctx context.Context, spaceID string, keyVer
 	}
 	defer tx.Rollback()
 	var lockedSpaceID string
-	if err := tx.QueryRowContext(ctx, `SELECT space_id FROM spaces WHERE space_id = $1 FOR UPDATE`, spaceID).Scan(&lockedSpaceID); err != nil {
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `SELECT space_id FROM spaces WHERE space_id = $1 FOR UPDATE`, `SELECT space_id FROM spaces WHERE space_id = $1 `), spaceID).Scan(&lockedSpaceID); err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
 	current, err := scanSpaceRecord(tx.QueryRowContext(ctx, `
@@ -294,7 +311,7 @@ func (r *SpacesRepository) RotateKey(ctx context.Context, spaceID string, keyVer
 			return nil, ErrSpaceLinkStateChanged
 		}
 	} else {
-		if err := deactivateSpaceLinksTx(ctx, tx, []string{spaceID}); err != nil {
+		if err := deactivateSpaceLinksTx(ctx, r.DB, tx, []string{spaceID}); err != nil {
 			return nil, err
 		}
 	}

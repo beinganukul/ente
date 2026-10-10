@@ -2,9 +2,9 @@ package storagebonus
 
 import (
 	"context"
-	"github.com/lib/pq"
 
 	"github.com/ente/museum/ente/storagebonus"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -28,7 +28,8 @@ func (r *Repository) GetStorageBonuses(ctx context.Context, userID int64) ([]sto
 
 func (r *Repository) GetActiveStorageBonuses(ctx context.Context, userID int64) (*storagebonus.ActiveStorageBonus, error) {
 	var bonuses = make([]storagebonus.StorageBonus, 0)
-	rows, err := r.DB.QueryContext(ctx, "SELECT user_id,storage,type, created_at, updated_at, valid_till, is_revoked, revoke_reason FROM storage_bonus WHERE user_id = $1 AND is_revoked = false AND (valid_till = 0 OR valid_till > now_utc_micro_seconds())", userID)
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB,
+		"SELECT user_id,storage,type, created_at, updated_at, valid_till, is_revoked, revoke_reason FROM storage_bonus WHERE user_id = $1 AND is_revoked = false AND (valid_till = 0 OR valid_till > now_utc_micro_seconds())", `SELECT user_id,storage,type, created_at, updated_at, valid_till, is_revoked, revoke_reason FROM storage_bonus WHERE user_id = $1 AND is_revoked = false AND (valid_till = 0 OR valid_till > CAST(unixepoch('subsec') * 1000000 AS INTEGER))`), userID)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to get active storage surplus for user %d", userID)
 	}
@@ -46,8 +47,9 @@ func (r *Repository) GetActiveStorageBonuses(ctx context.Context, userID int64) 
 
 func (r *Repository) ActiveStorageSurplusOfType(ctx context.Context, userID int64, bonusTypes []storagebonus.BonusType) (*int64, error) {
 	var total *int64
-	rows, err := r.DB.QueryContext(ctx, "SELECT coalesce(sum(storage),0) FROM storage_bonus "+
-		"WHERE user_id = $1 AND type = ANY($2) AND is_revoked = false AND (valid_till = 0 OR valid_till > now_utc_micro_seconds())", userID, pq.Array(bonusTypes))
+	rows, err := r.DB.QueryContext(ctx, "SELECT coalesce(sum(storage),0) FROM storage_bonus "+database.SQL(r.DB,
+		"WHERE user_id = $1 AND type = ANY($2) AND is_revoked = false AND (valid_till = 0 OR valid_till > now_utc_micro_seconds())", `WHERE user_id = $1 AND type IN (SELECT value FROM json_each($2)) AND is_revoked = false AND (valid_till = 0 OR valid_till > CAST(unixepoch('subsec') * 1000000 AS INTEGER))`), userID, database.Array(r.DB,
+		bonusTypes))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to get active storage surplus for users %d", userID)
 	}
@@ -70,7 +72,8 @@ func (r *Repository) GetAllUsersSurplusBonus(ctx context.Context) (refBonus map[
 	var bonusType storagebonus.BonusType
 	refBonus = make(map[int64]int64)
 	addonBonus = make(map[int64]int64)
-	rows, err := r.DB.QueryContext(ctx, "SELECT user_id, type, coalesce(sum(storage),0) FROM storage_bonus WHERE is_revoked = false AND (valid_till = 0 OR valid_till > now_utc_micro_seconds()) GROUP BY user_id, type")
+	rows, err := r.DB.QueryContext(ctx, database.SQL(r.DB,
+		"SELECT user_id, type, coalesce(sum(storage),0) FROM storage_bonus WHERE is_revoked = false AND (valid_till = 0 OR valid_till > now_utc_micro_seconds()) GROUP BY user_id, type", `SELECT user_id, type, coalesce(sum(storage),0) FROM storage_bonus WHERE is_revoked = false AND (valid_till = 0 OR valid_till > CAST(unixepoch('subsec') * 1000000 AS INTEGER)) GROUP BY user_id, type`))
 	if err != nil {
 		return nil, nil, stacktrace.Propagate(err, "failed to get active storage surplus for users")
 	}

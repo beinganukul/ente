@@ -213,7 +213,7 @@ s3:
 From `ente/server`,
 
 ```sh
-go run cmd/museum/main.go
+go run ./cmd/museum
 ```
 
 ### Testing
@@ -233,6 +233,77 @@ To run the full `server/` Go test suite, including Postgres-backed tests, use:
 
 The script creates a temporary `ente_test_*` database on the selected Postgres instance, runs the tests, and drops the database when it exits.
 
+The database and repository integration tests also run against a disposable libSQL
+HTTP server. Docker and curl are required:
+
+```sh
+./scripts/test-with-libsql.sh
+```
+
+These cover binding, commit/rollback, migration atomicity, dirty-version handling,
+repository behavior, and concurrency on libSQL.
+
+### Choosing PostgreSQL or Turso
+
+PostgreSQL remains the default. Set `db.provider: turso` or
+`ENTE_DB_PROVIDER=turso` to use Turso's libSQL service. Museum repositories select
+explicit queries for the configured provider; libSQL stores JSON and arrays as
+JSON, encrypted byte values as BLOBs, and IDs and timestamps as 64-bit integers.
+
+From `server/`, verify a hosted libSQL connection with:
+
+```sh
+export ENTE_DB_PROVIDER=turso
+export ENTE_DB_TURSO_URL=libsql://your-database.turso.io
+# Set ENTE_DB_TURSO_AUTH_TOKEN through your shell or secret manager.
+go run ./cmd/database
+```
+
+The token is a separate setting; credentials and query parameters in the URL are
+rejected. Remote connections require TLS. Local development may use
+`http://127.0.0.1:8080` without a token. This targets Turso's libSQL service using
+its [official Go client](https://github.com/tursodatabase/libsql-client-go).
+
+`go run ./cmd/database -migrate` selects `migrations/postgres` or
+`migrations/sqlite`. PostgreSQL's existing migration files and versions are
+unchanged. The SQLite baseline includes all Museum and Space tables. Future
+changes must update both tracks, with matching
+versions and an explicit no-op where only one backend changes. Changing the
+provider does not transfer data between databases.
+
+Run migrations before starting Museum. Turso migration runners acquire a database
+lease; a crashed runner's lease expires after ten minutes.
+Each SQLite migration runs in one transaction. Do not include explicit transaction
+control statements in the SQL file. Turso has an
+[HTTP transaction limit](https://docs.turso.tech/sdk/http/reference)
+of five seconds. Larger migrations need to be split into bounded steps. A failed
+migration rolls back its SQL but leaves the version dirty for manual inspection.
+
+To move an existing installation between PostgreSQL and libSQL, stop Museum and
+all jobs first. Keep the same Museum encryption, hashing, and JWT keys and the
+same object storage. Configure the source database, then export it:
+
+```sh
+go run ./cmd/database -export /private/path/museum.snapshot.jsonl
+```
+
+Configure the empty destination database, migrate it to the same version, and
+import the snapshot:
+
+```sh
+go run ./cmd/database -migrate
+go run ./cmd/database -import /private/path/museum.snapshot.jsonl
+```
+
+The snapshot contains private account data and is created with mode `0600`.
+Export refuses to overwrite a file. Import rejects populated destinations and
+schema mismatches, keeps constraints enabled, verifies row checksums before
+committing, and restores identity sequences. The source database remains intact.
+Verify the installation before restarting Museum against the destination.
+Remote libSQL imports must fit its transaction deadline; use a local libSQL
+instance and the provider's supported migration or replication workflow for
+larger datasets.
+
 ## Configuration
 
 By default, Museum uses the values in `configurations/local.yaml`.
@@ -244,3 +315,5 @@ The keys and values supported by this configuration file are documented in [conf
 > [!TIP]
 >
 > If your mobile app can connect to your self-hosted instance but cannot view or upload images, see [ente.com/help/self-hosting/administration/object-storage](https://ente.com/help/self-hosting/administration/object-storage).
+
+For Cloudflare Workers, see [the Workers deployment guide](workers/README.md).

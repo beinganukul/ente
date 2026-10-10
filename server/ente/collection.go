@@ -3,8 +3,6 @@ package ente
 import (
 	"database/sql/driver"
 	"encoding/json"
-
-	"github.com/ente/stacktrace"
 )
 
 var ValidCollectionTypes = []string{"album", "folder", "favorites", "uncategorized"}
@@ -74,12 +72,7 @@ func (ca CollectionAttributes) Value() (driver.Value, error) {
 }
 
 func (ca *CollectionAttributes) Scan(value interface{}) error {
-	b, ok := value.([]byte)
-	if !ok {
-		return stacktrace.NewError("type assertion to []byte failed")
-	}
-
-	return json.Unmarshal(b, &ca)
+	return scanJSON(value, ca)
 }
 
 type AlterShareRequest struct {

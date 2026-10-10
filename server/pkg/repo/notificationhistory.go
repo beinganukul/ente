@@ -5,8 +5,8 @@ import (
 	"database/sql"
 
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/time"
 )
 
@@ -59,11 +59,13 @@ func (repo *NotificationHistoryRepository) GetLastNotificationTimes(userID int64
 		return result, nil
 	}
 
-	rows, err := repo.DB.Query(
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
 		`SELECT template_id, MAX(sent_time) FROM notification_history
 		 WHERE user_id = $1 AND template_id = ANY($2)
-		 GROUP BY template_id`,
-		userID, pq.Array(templateIDs))
+		 GROUP BY template_id`, `SELECT template_id, MAX(sent_time) FROM notification_history
+		 WHERE user_id = $1 AND template_id IN (SELECT value FROM json_each($2))
+		 GROUP BY template_id`), userID, database.Array(repo.DB,
+		templateIDs))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to fetch notification history")
 	}
@@ -94,11 +96,13 @@ func (repo *NotificationHistoryRepository) DeleteNotificationHistoryByGroupExclu
 		return stacktrace.Propagate(err, "failed to delete grouped notification history")
 	}
 
-	_, err := repo.DB.Exec(
+	_, err := repo.DB.Exec(database.SQL(repo.DB,
 		`DELETE FROM notification_history
 		 WHERE notification_group = $1
-		   AND NOT (user_id = ANY($2))`,
-		notificationGroup, pq.Array(keepUserIDs))
+		   AND NOT (user_id = ANY($2))`, `DELETE FROM notification_history
+		 WHERE notification_group = $1
+		   AND NOT (user_id IN (SELECT value FROM json_each($2)))`), notificationGroup, database.Array(repo.DB,
+		keepUserIDs))
 	return stacktrace.Propagate(err, "failed to delete grouped notification history")
 }
 
@@ -163,14 +167,19 @@ func (repo *NotificationHistoryRepository) HasAnyNotificationForTemplates(userID
 		return false, nil
 	}
 
-	row := repo.DB.QueryRow(
+	row := repo.DB.QueryRow(database.SQL(repo.DB,
 		`SELECT EXISTS(
 			SELECT 1
 			  FROM notification_history
 			 WHERE user_id = $1
 			   AND template_id = ANY($2)
-		)`,
-		userID, pq.Array(templateIDs))
+		)`, `SELECT EXISTS(
+			SELECT 1
+			  FROM notification_history
+			 WHERE user_id = $1
+			   AND template_id IN (SELECT value FROM json_each($2))
+		)`), userID, database.Array(repo.DB,
+		templateIDs))
 	var exists bool
 	if err := row.Scan(&exists); err != nil {
 		return false, stacktrace.Propagate(err, "failed to read notification history existence")
@@ -183,11 +192,13 @@ func (repo *NotificationHistoryRepository) IsStorageWarningDeletionScheduled(use
 }
 
 func (repo *NotificationHistoryRepository) ClearStorageWarningDeletionScheduled(userID int64) error {
-	_, err := repo.DB.Exec(
+	_, err := repo.DB.Exec(database.SQL(repo.DB,
 		`DELETE FROM notification_history
 		 WHERE user_id = $1
-		   AND template_id = ANY($2)`,
-		userID, pq.Array(StorageWarningScheduledDeletionTemplateIDs()))
+		   AND template_id = ANY($2)`, `DELETE FROM notification_history
+		 WHERE user_id = $1
+		   AND template_id IN (SELECT value FROM json_each($2))`), userID, database.Array(repo.DB,
+		StorageWarningScheduledDeletionTemplateIDs()))
 	return stacktrace.Propagate(err, "failed to clear storage warning scheduled deletion history")
 }
 
@@ -220,11 +231,13 @@ func (repo *NotificationHistoryRepository) GrantStorageWarningLoginGrace(userID 
 	}
 	defer tx.Rollback()
 
-	result, err := tx.Exec(
+	result, err := tx.Exec(database.SQL(repo.DB,
 		`DELETE FROM notification_history
 		 WHERE user_id = $1
-		   AND template_id = ANY($2)`,
-		userID, pq.Array(StorageWarningScheduledDeletionTemplateIDs()))
+		   AND template_id = ANY($2)`, `DELETE FROM notification_history
+		 WHERE user_id = $1
+		   AND template_id IN (SELECT value FROM json_each($2))`), userID, database.Array(repo.DB,
+		StorageWarningScheduledDeletionTemplateIDs()))
 	if err != nil {
 		return 0, false, stacktrace.Propagate(err, "failed to clear storage warning scheduled deletion history")
 	}

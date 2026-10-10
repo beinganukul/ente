@@ -12,6 +12,7 @@ import (
 	"github.com/ente/museum/pkg/controller/family"
 	"github.com/ente/museum/pkg/repo"
 	storagebonusrepo "github.com/ente/museum/pkg/repo/storagebonus"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -176,7 +177,7 @@ func insertLockerUsageTestLockerFile(t *testing.T, db *sql.DB, ownerID, size int
 	var collectionID int64
 	err := db.QueryRow(
 		`INSERT INTO collections(owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, is_deleted, app)
-		 VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING collection_id`,
 		ownerID,
 		"encrypted-key",
@@ -195,7 +196,7 @@ func insertLockerUsageTestLockerFile(t *testing.T, db *sql.DB, ownerID, size int
 	var fileID int64
 	err = db.QueryRow(
 		`INSERT INTO files(owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, updation_time, info)
-		 VALUES($1, $2, $3, $4, $5, $6, $7::jsonb)
+		 VALUES($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING file_id`,
 		ownerID,
 		"file-header",
@@ -227,10 +228,11 @@ func insertLockerUsageTestLockerFile(t *testing.T, db *sql.DB, ownerID, size int
 
 	_, err = db.Exec(
 		`INSERT INTO object_keys(file_id, o_type, object_key, size, datacenters)
-		 VALUES($1, 'file', $2, $3, ARRAY['b2-eu-cen']::s3region[])`,
+		 VALUES($1, 'file', $2, $3, $4)`,
 		fileID,
 		uuid.NewString(),
 		size,
+		database.Array(db, []string{"b2-eu-cen"}),
 	)
 	if err != nil {
 		t.Fatalf("failed to insert object key for file %d: %v", fileID, err)

@@ -12,12 +12,11 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/awa/go-iap/playstore"
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/pkg/repo"
 	"github.com/ente/museum/pkg/utils/config"
 	"github.com/ente/museum/pkg/utils/email"
-	"google.golang.org/api/androidpublisher/v3"
+	"github.com/ente/museum/pkg/utils/playstore"
 )
 
 type PlayStoreController struct {
@@ -212,7 +211,7 @@ func (c *PlayStoreController) GetVerifiedSubscription(userID int64, productID st
 }
 
 func (c *PlayStoreController) AcknowledgeSubscription(subscriptionID string, token string) error {
-	req := &androidpublisher.SubscriptionPurchasesAcknowledgeRequest{}
+	req := &playstore.SubscriptionPurchasesAcknowledgeRequest{}
 	context := context.Background()
 	return c.PlayStoreClient.AcknowledgeSubscription(context, PlayStorePackageName, subscriptionID, token, req)
 }
@@ -222,7 +221,7 @@ func (c *PlayStoreController) CancelSubscription(subscriptionID string, verifica
 	return c.PlayStoreClient.CancelSubscription(context, PlayStorePackageName, subscriptionID, verificationData)
 }
 
-func (c *PlayStoreController) verifySubscription(subscriptionID string, verificationData string) (*androidpublisher.SubscriptionPurchase, error) {
+func (c *PlayStoreController) verifySubscription(subscriptionID string, verificationData string) (*playstore.SubscriptionPurchase, error) {
 	context := context.Background()
 	return c.PlayStoreClient.VerifySubscription(context, PlayStorePackageName, subscriptionID, verificationData)
 }

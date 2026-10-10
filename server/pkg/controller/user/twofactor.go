@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"image/png"
 
 	"github.com/ente/museum/pkg/utils/network"
@@ -122,7 +123,7 @@ func (c *UserController) VerifyTwoFactor(context *gin.Context, sessionID string,
 	}
 	if !reserved {
 		msg := fmt.Sprintf("Too many wrong two-factor verification attempts for userID: %d", userID)
-		go c.DiscordController.NotifyPotentialAbuse(msg)
+		workerjobs.Background(func() { c.DiscordController.NotifyPotentialAbuse(msg) })
 		return ente.TwoFactorAuthorizationResponse{}, stacktrace.Propagate(ente.ErrTooManyBadRequest, "Too many wrong attempts, please request a new verification session")
 	}
 	valid := totp.Validate(otp, secret)
@@ -141,7 +142,7 @@ func (c *UserController) VerifyTwoFactor(context *gin.Context, sessionID string,
 	} else if !wasNew {
 		msg := fmt.Sprintf("Replay attack detected for userID: %d - OTP code reused", userID)
 		log.Warn(msg)
-		go c.DiscordController.NotifyPotentialAbuse(msg)
+		workerjobs.Background(func() { c.DiscordController.NotifyPotentialAbuse(msg) })
 		return ente.TwoFactorAuthorizationResponse{}, stacktrace.Propagate(ente.ErrIncorrectTOTP, "OTP code has already been used")
 	}
 	response, err := c.GetKeyAttributeAndToken(context, userID, sessionID, repo.TOTPPendingLogin, false, false)

@@ -9,6 +9,7 @@ import (
 	"github.com/ente/stacktrace"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/time"
 )
 
@@ -22,18 +23,22 @@ type ObjectCleanupRepository struct {
 }
 
 func (repo *ObjectCleanupRepository) AddTempObject(tempObject ente.TempObject, expirationTime int64) error {
-	_, err := repo.DB.Exec(`
+	_, err := repo.DB.Exec(database.SQL(repo.DB,
+		`
 		INSERT INTO temp_objects (
 		    object_key, expiration_time, upload_id, is_multipart, bucket_id,
 		    user_id, app, purpose, content_length, content_md5, client
-		) VALUES ($1, $2, NULLIF($3, ''), $4, $5, NULLIF($6::BIGINT, 0), NULLIF($7, ''), NULLIF($8, ''), $9, $10, NULLIF($11, ''))`,
-		tempObject.ObjectKey, expirationTime, tempObject.UploadID, tempObject.IsMultipart, tempObject.BucketId,
+		) VALUES ($1, $2, NULLIF($3, ''), $4, $5, NULLIF($6::BIGINT, 0), NULLIF($7, ''), NULLIF($8, ''), $9, $10, NULLIF($11, ''))`, `
+		INSERT INTO temp_objects (
+		    object_key, expiration_time, upload_id, is_multipart, bucket_id,
+		    user_id, app, purpose, content_length, content_md5, client
+		) VALUES ($1, $2, NULLIF($3, ''), $4, $5, NULLIF($6, 0), NULLIF($7, ''), NULLIF($8, ''), $9, $10, NULLIF($11, ''))`), tempObject.ObjectKey, expirationTime, tempObject.UploadID, tempObject.IsMultipart, tempObject.BucketId,
 		tempObject.UserID, tempObject.App, tempObject.Purpose, tempObject.ContentLength, tempObject.ContentMD5, tempObject.Client)
 	return stacktrace.Propagate(err, "")
 }
 
 func (repo *ObjectCleanupRepository) RemoveTempObjectKey(ctx context.Context, tx *sql.Tx, objectKey string, dc string) error {
-	res, err := tx.ExecContext(ctx, `DELETE FROM temp_objects WHERE object_key = $1`, objectKey)
+	res, err := tx.ExecContext(ctx, `DELETE FROM temp_objects WHERE object_key = $1 AND cleanup_claim IS NULL`, objectKey)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -48,7 +53,7 @@ func (repo *ObjectCleanupRepository) RemoveTempObjectKey(ctx context.Context, tx
 }
 
 func (repo *ObjectCleanupRepository) RemoveTempObjectFromDC(ctx context.Context, tx *sql.Tx, objectKey string, dc string) error {
-	res, err := tx.ExecContext(ctx, `DELETE FROM temp_objects WHERE object_key = $1 and bucket_id = $2`, objectKey, dc)
+	res, err := tx.ExecContext(ctx, `DELETE FROM temp_objects WHERE object_key = $1 and bucket_id = $2 AND cleanup_claim IS NULL`, objectKey, dc)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -88,12 +93,17 @@ func (repo *ObjectCleanupRepository) GetAndLockExpiredObjects() (*sql.Tx, []ente
 		}
 	}()
 
-	rows, err := tx.Query(`
+	rows, err := tx.Query(database.SQL(repo.DB,
+		`
 	SELECT object_key, is_multipart, upload_id, bucket_id FROM temp_objects
 	WHERE expiration_time <= $1
 	LIMIT 1000
 	FOR UPDATE SKIP LOCKED
-	`, time.Microseconds())
+	`, `
+	SELECT object_key, is_multipart, upload_id, bucket_id FROM temp_objects
+	WHERE expiration_time <= $1
+	LIMIT 1000
+`), time.Microseconds())
 
 	if err != nil {
 		return nil, nil, stacktrace.Propagate(err, "")

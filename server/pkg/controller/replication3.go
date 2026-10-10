@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -83,6 +85,9 @@ func (c *ReplicationController3) StartReplication() error {
 		workerCount = 6
 	}
 
+	if workerjobs.Register("@every 1m", func() { _ = c.tryReplicate() }) {
+		return nil
+	}
 	go c.startWorkers(workerCount)
 
 	return nil
@@ -109,6 +114,9 @@ func (c *ReplicationController3) createMetrics() {
 }
 
 func (c *ReplicationController3) createTemporaryStorage() error {
+	if runtime.GOOS == "js" {
+		return nil
+	}
 	tempStorage := viper.GetString("replication.tmp-storage")
 	if tempStorage == "" {
 		tempStorage = "tmp/replication"
@@ -242,29 +250,33 @@ func (c *ReplicationController3) tryReplicate() error {
 		return done(nil)
 	}
 
-	err = fileutil.EnsureSufficientSpace(ob.Size)
-	if err != nil {
-		return done(stacktrace.Propagate(err, ""))
-	}
+	var file *os.File
+	if runtime.GOOS != "js" {
+		err = fileutil.EnsureSufficientSpace(ob.Size)
+		if err != nil {
+			return done(stacktrace.Propagate(err, ""))
+		}
 
-	filePath, file, err := fileutil.CreateTemporaryFile(c.tempStorage, objectKey)
-	if err != nil {
-		return done(stacktrace.Propagate(err, "Failed to create temporary file"))
-	}
-	defer os.Remove(filePath)
-	defer file.Close()
+		filePath, temporary, err := fileutil.CreateTemporaryFile(c.tempStorage, objectKey)
+		if err != nil {
+			return done(stacktrace.Propagate(err, "Failed to create temporary file"))
+		}
+		defer os.Remove(filePath)
+		file = temporary
+		defer file.Close()
 
-	downloadedSize, err := c.downloadFromB2ViaWorker(objectKey, file, logger)
-	if err != nil {
-		return done(stacktrace.Propagate(err, "Failed to download object from B2"))
-	}
-	logger.Infof("Downloaded %d bytes to %s", downloadedSize, filePath)
+		downloadedSize, err := c.downloadFromB2ViaWorker(objectKey, file, logger)
+		if err != nil {
+			return done(stacktrace.Propagate(err, "Failed to download object from B2"))
+		}
+		logger.Infof("Downloaded %d bytes to %s", downloadedSize, filePath)
 
-	if downloadedSize != ob.Size {
-		c.notifyDiscord(fmt.Sprintf("⚠️ Replication download size mismatch for %s: got %d bytes, expected %d", objectKey, downloadedSize, ob.Size))
-		return done(stacktrace.NewError("downloaded size (%d) does not match expected size (%d)", downloadedSize, ob.Size))
-	}
+		if downloadedSize != ob.Size {
+			c.notifyDiscord(fmt.Sprintf("⚠️ Replication download size mismatch for %s: got %d bytes, expected %d", objectKey, downloadedSize, ob.Size))
+			return done(stacktrace.NewError("downloaded size (%d) does not match expected size (%d)", downloadedSize, ob.Size))
+		}
 
+	}
 	in := &UploadInput{
 		File:         file,
 		ObjectKey:    objectKey,
@@ -423,7 +435,11 @@ func (c *ReplicationController3) replicateFile(in *UploadInput, dest *UploadDest
 // Compliance-locked Wasabi returns 403 when that upload is retried, so allow
 // the HEAD size check to verify the existing object.
 func (c *ReplicationController3) uploadFile(in *UploadInput, dest *UploadDestination) error {
-	in.File.Seek(0, io.SeekStart)
+	if in.File != nil {
+		if _, err := in.File.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+	}
 
 	up := s3manager.UploadInput{
 		Bucket: dest.Bucket,
@@ -434,7 +450,15 @@ func (c *ReplicationController3) uploadFile(in *UploadInput, dest *UploadDestina
 		up.StorageClass = aws.String(s3.ObjectStorageClassGlacier)
 	}
 
-	result, err := dest.Uploader.Upload(&up)
+	var result *s3manager.UploadOutput
+	var err error
+	if runtime.GOOS == "js" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		result, err = s3config.StreamObject(ctx, c.b2Client, c.b2Bucket, in.ExpectedSize, dest.Uploader, &up)
+	} else {
+		result, err = dest.Uploader.Upload(&up)
+	}
 	if err != nil && dest.HasComplianceHold && c.isRequestFailureAccessDenied(err) {
 		in.Logger.Infof("Ignoring object that already exists on remote (we'll verify it using a HEAD check): %s", err)
 		return nil

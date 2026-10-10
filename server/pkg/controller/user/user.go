@@ -8,6 +8,7 @@ import (
 	"github.com/ente/museum/pkg/controller/collections"
 	"github.com/ente/museum/pkg/repo/two_factor_recovery"
 	util "github.com/ente/museum/pkg/utils"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ulule/limiter/v3"
 
 	cache2 "github.com/ente/museum/ente/cache"
@@ -346,14 +347,14 @@ func (c *UserController) handleAccountDeletion(
 
 	email := user.Email
 	// Mailing list failures must not block account deletion.
-	go func() {
+	workerjobs.Background(func() {
 		if err := c.MailingListsController.Unsubscribe(email); err != nil {
 			logger.WithError(err).WithFields(logrus.Fields{
 				"user_id": userID,
 				"email":   email,
 			}).Error("mailing list unsubscribe failed")
 		}
-	}()
+	})
 
 	logger.Info("mark user as deleted and schedule data deletion")
 	if err := c.markAccountDeletedAndScheduleCleanup(ctx, userID); err != nil {
@@ -361,7 +362,7 @@ func (c *UserController) handleAccountDeletion(
 	}
 
 	if sendDeletionEmail {
-		go c.NotifyAccountDeletion(userID, email, isSubscriptionCancelled)
+		workerjobs.Background(func() { c.NotifyAccountDeletion(userID, email, isSubscriptionCancelled) })
 	}
 
 	return &ente.DeleteAccountResponse{
@@ -442,13 +443,13 @@ func (c *UserController) createUser(ctx context.Context, email string, source *s
 		return -1, ente.Subscription{}, stacktrace.Propagate(err, "failed to commit user creation")
 	}
 	// Mailing list failures must not block user creation.
-	go func() {
+	workerjobs.Background(func() {
 		if err := c.MailingListsController.Subscribe(email); err != nil {
 			logrus.WithError(err).WithFields(logrus.Fields{
 				"user_id": userID,
 				"email":   email,
 			}).Error("mailing list subscribe failed")
 		}
-	}()
+	})
 	return userID, subscription, nil
 }

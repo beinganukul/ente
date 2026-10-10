@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"net/http"
 
 	entity "github.com/ente/museum/ente/storagebonus"
@@ -24,7 +25,7 @@ func (r *Repository) GetCode(ctx context.Context, userID int64) (*string, error)
 func (r *Repository) InsertCode(ctx context.Context, userID int64, code string) error {
 	_, err := r.DB.ExecContext(ctx, "INSERT INTO referral_codes (user_id, code) VALUES ($1, $2)", userID, code)
 	if err != nil {
-		if err.Error() == "pq: duplicate key value violates unique constraint \"referral_codes_pkey\"" {
+		if database.IsUniqueViolation(err) {
 			return stacktrace.Propagate(entity.CodeAlreadyExistsErr, "duplicate storagebonus code for user %d", userID)
 		}
 		return stacktrace.Propagate(err, "failed to insert storagebonus code for user %d", userID)

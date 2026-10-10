@@ -6,8 +6,8 @@ import (
 	"errors"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type PasteRepository struct {
@@ -42,18 +42,21 @@ func (r *PasteRepository) Insert(
 	if err == nil {
 		return nil
 	}
-	var pqErr *pq.Error
-	if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+	if database.IsUniqueViolation(err) {
 		return ente.ErrAccessTokenInUse
 	}
 	return stacktrace.Propagate(err, "failed to insert paste token")
 }
 
 func (r *PasteRepository) ExistsActiveByToken(ctx context.Context, accessToken string) (bool, error) {
-	row := r.DB.QueryRowContext(ctx, `SELECT 1 FROM public_paste_tokens
+	row := r.DB.QueryRowContext(ctx, database.SQL(r.DB,
+		`SELECT 1 FROM public_paste_tokens
 		WHERE access_token = $1
 		  AND expires_at > now_utc_micro_seconds()
-		LIMIT 1`, accessToken)
+		LIMIT 1`, `SELECT 1 FROM public_paste_tokens
+		WHERE access_token = $1
+		  AND expires_at > CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+		LIMIT 1`), accessToken)
 	var ok int
 	err := row.Scan(&ok)
 	if err == nil {
@@ -69,10 +72,14 @@ func (r *PasteRepository) ConsumeByToken(
 	ctx context.Context,
 	accessToken string,
 ) (*ente.PastePayload, error) {
-	row := r.DB.QueryRowContext(ctx, `DELETE FROM public_paste_tokens
+	row := r.DB.QueryRowContext(ctx, database.SQL(r.DB,
+		`DELETE FROM public_paste_tokens
 		WHERE access_token = $1
 		  AND expires_at > now_utc_micro_seconds()
-		RETURNING encrypted_data, decryption_header, encrypted_paste_key, encrypted_paste_key_nonce, kdf_nonce, kdf_mem_limit, kdf_ops_limit`, accessToken)
+		RETURNING encrypted_data, decryption_header, encrypted_paste_key, encrypted_paste_key_nonce, kdf_nonce, kdf_mem_limit, kdf_ops_limit`, `DELETE FROM public_paste_tokens
+		WHERE access_token = $1
+		  AND expires_at > CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+		RETURNING encrypted_data, decryption_header, encrypted_paste_key, encrypted_paste_key_nonce, kdf_nonce, kdf_mem_limit, kdf_ops_limit`), accessToken)
 	payload := ente.PastePayload{}
 	if err := row.Scan(
 		&payload.EncryptedData,
@@ -92,8 +99,10 @@ func (r *PasteRepository) ConsumeByToken(
 }
 
 func (r *PasteRepository) CleanupExpired(ctx context.Context) error {
-	_, err := r.DB.ExecContext(ctx, `DELETE FROM public_paste_tokens
-		WHERE expires_at <= now_utc_micro_seconds()`)
+	_, err := r.DB.ExecContext(ctx, database.SQL(r.DB,
+		`DELETE FROM public_paste_tokens
+		WHERE expires_at <= now_utc_micro_seconds()`, `DELETE FROM public_paste_tokens
+		WHERE expires_at <= CAST(unixepoch('subsec') * 1000000 AS INTEGER)`))
 	if err != nil {
 		return stacktrace.Propagate(err, "failed to clean up expired pastes")
 	}

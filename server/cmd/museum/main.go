@@ -7,11 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/signal"
 	"path"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/ente/museum/pkg/controller/collections"
@@ -72,8 +70,10 @@ import (
 	userEntityRepo "github.com/ente/museum/pkg/repo/userentity"
 	"github.com/ente/museum/pkg/utils/billing"
 	"github.com/ente/museum/pkg/utils/config"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/s3config"
 	timeUtil "github.com/ente/museum/pkg/utils/time"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	spaceapi "github.com/ente/museum/space/api"
 	spacecontroller "github.com/ente/museum/space/controller"
 	spacerepo "github.com/ente/museum/space/repo"
@@ -81,14 +81,9 @@ import (
 	"github.com/gin-contrib/requestid"
 	"github.com/gin-contrib/timeout"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
-	_ "github.com/lib/pq"
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/robfig/cron/v3"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
@@ -96,7 +91,9 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-func main() {
+var closeServer func()
+
+func newServer() *gin.Engine {
 	environment := os.Getenv("ENVIRONMENT")
 	if environment == "" {
 		environment = "local"
@@ -120,6 +117,13 @@ func main() {
 	viper.SetDefault("apps.space", "https://ente.space")
 
 	setupLogger(environment)
+	if runtime.GOOS == "js" {
+		for _, name := range []string{"ENTE_KEY_ENCRYPTION", "ENTE_KEY_HASH", "ENTE_JWT_SECRET"} {
+			if os.Getenv(name) == "" {
+				panic(name + " must be configured as a Worker secret")
+			}
+		}
+	}
 	log.Infof("Booting up %s server with commit #%s", environment, os.Getenv("GIT_COMMIT"))
 
 	secretEncryptionKey := viper.GetString("key.encryption")
@@ -144,11 +148,9 @@ func main() {
 	}
 
 	db := setupDatabase()
-	defer db.Close()
 	latencySensitiveDB := setupLatencySensitiveDatabase()
-	defer latencySensitiveDB.Close()
 
-	hostName, err := os.Hostname()
+	hostName, err := serverHostName()
 	if err != nil {
 		log.Fatal("Could not get host name", err)
 	}
@@ -229,7 +231,12 @@ func main() {
 	discordController := discord.NewDiscordController(userRepo, hostName, environment)
 	userLookupController := controller.NewUserLookupController(userRepo, discordController)
 	rateLimiter := middleware.NewRateLimitMiddleware(discordController, 1000, 1*time.Second)
-	defer rateLimiter.Stop()
+	closeServer = func() {
+		rateLimiter.Stop()
+		db.Close()
+		latencySensitiveDB.Close()
+		discordController.NotifyShutdown()
+	}
 
 	emailNotificationCtrl := &email.EmailNotificationController{
 		UserRepo:                userRepo,
@@ -242,7 +249,9 @@ func main() {
 	}
 	fileCountInitializer := controller.NewFileCountInitializer(usageRepo, trashRepo, lockController)
 	usageRepo.QueueFileCountInitialization = fileCountInitializer.Enqueue
-	go fileCountInitializer.Run()
+	if !workerjobs.Register("@every 1m", fileCountInitializer.RunOnce) {
+		go fileCountInitializer.Run()
+	}
 
 	userCache := cache2.NewUserCache()
 	userCacheCtrl := &usercache.Controller{UserCache: userCache, FileRepo: fileRepo,
@@ -1104,7 +1113,7 @@ func main() {
 
 	setKnownAPIs(server.Routes())
 	setupAndStartBackgroundJobs(objectCleanupController, replicationController3, fileDataCtrl, contactController, spaceModule)
-	time.AfterFunc(10*time.Minute, func() {
+	backfill := func() {
 		if err := remoteStoreRepository.MigrateCustomDomainCanonicalValues(context.Background()); err != nil {
 			log.WithError(err).Error("Failed to backfill custom domain canonical values")
 		}
@@ -1114,7 +1123,10 @@ func main() {
 		} else if migrated > 0 {
 			log.WithField("tokens", migrated).Info("Cleared plaintext tokens")
 		}
-	})
+	}
+	if !workerjobs.Register("@every 10m", backfill) {
+		time.AfterFunc(10*time.Minute, backfill)
+	}
 	setupAndStartCrons(
 		userAuthRepo, collectionLinkRepo, fileLinkRepo, pasteRepo, twoFactorRepo, passkeysRepo, fileController, taskLockingRepo, emailNotificationCtrl,
 		trashController, pushController, objectController, dataCleanupController, storageBonusCtrl, emergencyCtrl,
@@ -1124,17 +1136,9 @@ func main() {
 	latencySensitiveDBCollector := sqlstats.NewStatsCollector("latency_sensitive_db", latencySensitiveDB)
 	prometheus.MustRegister(primaryDBCollector, latencySensitiveDBCollector)
 
-	http.Handle("/metrics", promhttp.Handler())
-	go http.ListenAndServe(":2112", nil)
-	go runServer(environment, server)
 	discordController.NotifyStartup()
 	log.Println("We have lift-off.")
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server...")
-	discordController.NotifyShutdown()
+	return server
 }
 
 func runServer(environment string, server *gin.Engine) {
@@ -1172,11 +1176,11 @@ func setupLogger(environment string) {
 		return funcName, fmt.Sprintf("%s:%d", path.Base(f.File), f.Line)
 	}
 	logFile := viper.GetString("log-file")
-	if environment == "local" && logFile == "" {
+	if (environment == "local" && logFile == "") || runtime.GOOS == "js" {
 		log.SetFormatter(&log.TextFormatter{
 			CallerPrettyfier: callerPrettyfier,
 			DisableQuote:     true,
-			ForceColors:      true,
+			ForceColors:      runtime.GOOS != "js",
 		})
 	} else {
 		log.SetFormatter(&log.JSONFormatter{
@@ -1196,60 +1200,46 @@ func setupLogger(environment string) {
 }
 
 func setupDatabase() *sql.DB {
-	log.Println("Setting up db")
-	db, err := sql.Open("postgres", config.GetPGInfo())
-
-	if err != nil {
-		log.Panic(err)
+	cfg := database.ConfigFromViper()
+	if err := cfg.ValidateMuseumProvider(); err != nil {
 		panic(err)
 	}
-	log.Println("Connected to DB")
-	err = db.Ping()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	db, err := openServerDatabase(ctx, cfg)
 	if err != nil {
 		panic(err)
 	}
-	log.Println("Pinged DB")
-
-	driver, _ := postgres.WithInstance(db, &postgres.Config{})
-	m, err := migrate.NewWithDatabaseInstance(
-		"file://migrations", "postgres", driver)
-	if err != nil {
-		log.Panic(err)
+	if err := migrateServerDatabase(ctx, cfg); err != nil {
+		_ = db.Close()
 		panic(err)
 	}
-	log.Println("Loaded migration scripts")
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		log.Panic(err)
-		panic(err)
-	}
-
 	db.SetMaxIdleConns(30)
 	db.SetMaxOpenConns(60)
+	if runtime.GOOS == "js" {
+		db.SetMaxOpenConns(2)
+		db.SetMaxIdleConns(2)
+	}
 	db.SetConnMaxLifetime(30 * time.Minute)
 	db.SetConnMaxIdleTime(10 * time.Minute)
-
 	log.Println("Database was configured successfully.")
-
 	return db
 }
 
 func setupLatencySensitiveDatabase() *sql.DB {
-	log.Println("Setting up latency sensitive db")
-	db, err := sql.Open("postgres", config.GetPGInfo())
-
-	if err != nil {
-		log.Panic(err)
-		panic(err)
-	}
-	log.Println("Connected to latency sensitive DB")
-	err = db.Ping()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	db, err := openServerDatabase(ctx, database.ConfigFromViper())
 	if err != nil {
 		panic(err)
 	}
-	log.Println("Pinged latency sensitive DB")
 
 	db.SetMaxIdleConns(50)
 	db.SetMaxOpenConns(100)
+	if runtime.GOOS == "js" {
+		db.SetMaxOpenConns(2)
+		db.SetMaxIdleConns(2)
+	}
 	db.SetConnMaxLifetime(30 * time.Minute)
 	db.SetConnMaxIdleTime(10 * time.Minute)
 
@@ -1317,6 +1307,9 @@ func setupAndStartCrons(userAuthRepo *repo.UserAuthRepository, collectionLinkRep
 	const deletedTokenRetentionDays = 427 // 13-month deletion window (395 days) + 32-day safety buffer
 
 	c := cron.New()
+	if runtime.GOOS == "js" {
+		c = workerjobs.Scheduler
+	}
 	schedule(c, "@every 1m", func() {
 		_ = userAuthRepo.RemoveExpiredOTTs()
 	})
@@ -1434,7 +1427,7 @@ func setupAndStartCrons(userAuthRepo *repo.UserAuthRepository, collectionLinkRep
 		pushController.ClearExpiredTokens()
 	})
 
-	c.Start()
+	startServerCron(c)
 }
 
 func cors() gin.HandlerFunc {
@@ -1508,10 +1501,16 @@ func setKnownAPIs(routes []gin.RouteInfo) {
 }
 
 func schedule(c *cron.Cron, spec string, cmd func()) (cron.EntryID, error) {
+	if runtime.GOOS == "js" {
+		return workerjobs.Add(spec, cmd, false)
+	}
 	return c.AddFunc(spec, cmd)
 }
 
 func scheduleAndRun(c *cron.Cron, spec string, cmd func()) (cron.EntryID, error) {
+	if runtime.GOOS == "js" {
+		return workerjobs.Add(spec, cmd, true)
+	}
 	go cmd()
 	return schedule(c, spec, cmd)
 }

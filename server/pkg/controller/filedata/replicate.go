@@ -10,9 +10,11 @@ import (
 	fileDataRepo "github.com/ente/museum/pkg/repo/filedata"
 	"github.com/ente/museum/pkg/utils/file"
 	enteTime "github.com/ente/museum/pkg/utils/time"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ente/stacktrace"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
+	"runtime"
 	"time"
 )
 
@@ -33,11 +35,17 @@ func (c *Controller) StartReplication() error {
 	if err != nil {
 		return stacktrace.Propagate(err, "Failed to create temporary storage")
 	}
+	if workerjobs.Register("@every 1m", func() { _ = c.tryReplicate() }) {
+		return nil
+	}
 	go c.startWorkers(workerCount)
 	return nil
 }
 
 func (c *Controller) createTemporaryStorage() error {
+	if runtime.GOOS == "js" {
+		return nil
+	}
 	tempStorage := viper.GetString("replication.file-data.tmp-storage")
 	if tempStorage == "" {
 		tempStorage = "tmp/replication-file-data"

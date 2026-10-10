@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"net/http"
 	"strings"
 
@@ -86,11 +87,13 @@ func (c *FriendsController) Add(ctx context.Context, requesterSpace *repo.SpaceR
 		return nil, err
 	}
 	if becameFriends {
-		go c.ActivityNotifier.OnSpaceFriendAdded(spaceActivityActor(requesterSpace), request.RequesterID)
+		workerjobs.Background(func() { c.ActivityNotifier.OnSpaceFriendAdded(spaceActivityActor(requesterSpace), request.RequesterID) })
 		return &models.FriendStatusResponse{Status: "friend"}, nil
 	}
 	if created {
-		go c.ActivityNotifier.OnSpaceFriendRequested(spaceActivityActor(requesterSpace), request.TargetID)
+		workerjobs.Background(func() {
+			c.ActivityNotifier.OnSpaceFriendRequested(spaceActivityActor(requesterSpace), request.TargetID)
+		})
 	}
 	return &models.FriendStatusResponse{Status: "requested"}, nil
 }
@@ -152,7 +155,7 @@ func (c *FriendsController) ConfirmRequest(ctx context.Context, targetSpace *rep
 		return nil, err
 	}
 	if created {
-		go c.ActivityNotifier.OnSpaceFriendAdded(spaceActivityActor(targetSpace), requesterID)
+		workerjobs.Background(func() { c.ActivityNotifier.OnSpaceFriendAdded(spaceActivityActor(targetSpace), requesterID) })
 	}
 	return &models.FriendStatusResponse{Status: "friend"}, nil
 }

@@ -3,6 +3,7 @@ package repo
 import (
 	"database/sql"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
 	"github.com/sirupsen/logrus"
@@ -13,10 +14,12 @@ type TaskLockRepository struct {
 }
 
 func (repo *TaskLockRepository) AcquireLock(name string, lockUntil int64, lockedBy string) (bool, error) {
-	result, err := repo.DB.Exec(
-		`INSERT INTO task_lock(task_name, lock_until, locked_at, locked_by) VALUES($1, $2, $3, $4) 
-		ON CONFLICT ON CONSTRAINT task_lock_pkey DO UPDATE SET lock_until = $2, locked_at = $3, locked_by = $4 
-		where task_lock.lock_until < $3`, name, lockUntil, time.Microseconds(), lockedBy)
+	result, err := repo.DB.Exec(database.SQL(repo.DB,
+		`INSERT INTO task_lock(task_name, lock_until, locked_at, locked_by) VALUES($1, $2, $3, $4)
+		ON CONFLICT ON CONSTRAINT task_lock_pkey DO UPDATE SET lock_until = $2, locked_at = $3, locked_by = $4
+		where task_lock.lock_until < $3`, `INSERT INTO task_lock(task_name, lock_until, locked_at, locked_by) VALUES($1, $2, $3, $4)
+		ON CONFLICT (task_name) DO UPDATE SET lock_until = $2, locked_at = $3, locked_by = $4
+		where task_lock.lock_until < $3`), name, lockUntil, time.Microseconds(), lockedBy)
 	if err != nil {
 		return false, stacktrace.Propagate(err, "")
 	}

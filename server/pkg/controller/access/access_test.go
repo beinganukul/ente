@@ -42,7 +42,7 @@ func insertAccessTestCollection(t *testing.T, db *sql.DB, ownerID int64, isDelet
 	var collectionID int64
 	err := db.QueryRow(
 		`INSERT INTO collections(owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, is_deleted, app)
-		 VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING collection_id`,
 		ownerID,
 		"encrypted-key",
@@ -85,7 +85,7 @@ func insertAccessTestFile(t *testing.T, db *sql.DB, ownerID int64) int64 {
 	var fileID int64
 	err := db.QueryRow(
 		`INSERT INTO files(owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, updation_time, info)
-		 VALUES($1, $2, $3, $4, $5, $6, $7::jsonb)
+		 VALUES($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING file_id`,
 		ownerID,
 		"file-header",

@@ -3,6 +3,7 @@ package cast
 import (
 	"context"
 	"encoding/base64"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/ente/cast"
@@ -128,7 +129,7 @@ func (c *Controller) GetCollectionAndCasterIDForToken(ctx *gin.Context, token st
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to verify cast access")
 	}
-	go c.CastRepo.UpdateLastUsedAtForToken(ctx, token)
+	workerjobs.Background(func() { c.CastRepo.UpdateLastUsedAtForToken(ctx, token) })
 	return &cast.AuthContext{UserID: userId, CollectionID: collectId}, nil
 
 }

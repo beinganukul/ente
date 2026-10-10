@@ -56,24 +56,37 @@ func (c *FileCountInitializer) Enqueue(userID int64) {
 
 func (c *FileCountInitializer) Run() {
 	for userID := range c.queue {
-		retry := c.initializeUser(userID)
-		now := time.Now()
-		c.mu.Lock()
-		if retry {
-			delete(c.attemptedAt, userID)
-		} else {
-			c.attemptedAt[userID] = now
-		}
-		if now.Sub(c.lastPrunedAt) >= fileCountInitializationRetry {
-			for id, attemptedAt := range c.attemptedAt {
-				if !attemptedAt.IsZero() && now.Sub(attemptedAt) >= fileCountInitializationRetry {
-					delete(c.attemptedAt, id)
-				}
-			}
-			c.lastPrunedAt = now
-		}
-		c.mu.Unlock()
+		c.process(userID)
 	}
+}
+
+// RunOnce drains one queued user within a Worker alarm.
+func (c *FileCountInitializer) RunOnce() {
+	select {
+	case userID := <-c.queue:
+		c.process(userID)
+	default:
+	}
+}
+
+func (c *FileCountInitializer) process(userID int64) {
+	retry := c.initializeUser(userID)
+	now := time.Now()
+	c.mu.Lock()
+	if retry {
+		delete(c.attemptedAt, userID)
+	} else {
+		c.attemptedAt[userID] = now
+	}
+	if now.Sub(c.lastPrunedAt) >= fileCountInitializationRetry {
+		for id, attemptedAt := range c.attemptedAt {
+			if !attemptedAt.IsZero() && now.Sub(attemptedAt) >= fileCountInitializationRetry {
+				delete(c.attemptedAt, id)
+			}
+		}
+		c.lastPrunedAt = now
+	}
+	c.mu.Unlock()
 }
 
 func (c *FileCountInitializer) initializeUser(userID int64) bool {

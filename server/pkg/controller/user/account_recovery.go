@@ -12,11 +12,11 @@ import (
 	"github.com/ente/museum/ente"
 	enteJWT "github.com/ente/museum/ente/jwt"
 	"github.com/ente/museum/pkg/utils/crypto"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/email"
 	"github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -231,6 +231,5 @@ func (c *UserController) recoverAccount(ctx *gin.Context, req ente.RecoverAccoun
 }
 
 func isEmailHashUniqueConstraint(err error) bool {
-	var pqErr *pq.Error
-	return errors.As(err, &pqErr) && pqErr.Code == "23505"
+	return database.IsUniqueViolation(err)
 }

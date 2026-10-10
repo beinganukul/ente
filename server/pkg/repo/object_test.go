@@ -7,7 +7,7 @@ import (
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/internal/testutil"
-	"github.com/lib/pq"
+	"github.com/ente/museum/pkg/utils/database"
 )
 
 func TestObjectLookupDBUsesLatencySensitiveDBWhenPresent(t *testing.T) {
@@ -366,11 +366,12 @@ func insertObjectTestFile(t *testing.T, db *sql.DB, ownerID int64) int64 {
 	t.Helper()
 
 	var fileID int64
-	err := db.QueryRow(
+	err := db.QueryRow(database.SQL(db,
 		`INSERT INTO files(owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, updation_time, info)
 		 VALUES($1, $2, $3, $4, $5, $6, $7::jsonb)
-		 RETURNING file_id`,
-		ownerID,
+		 RETURNING file_id`, `INSERT INTO files(owner_id, file_decryption_header, thumbnail_decryption_header, metadata_decryption_header, encrypted_metadata, updation_time, info)
+		 VALUES($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING file_id`), ownerID,
 		"file-header",
 		"thumbnail-header",
 		"metadata-header",
@@ -394,7 +395,7 @@ func insertObjectTestKey(t *testing.T, db *sql.DB, fileID int64, objType ente.Ob
 		objType,
 		objectKey,
 		size,
-		pq.StringArray(datacenters),
+		database.Array(db, datacenters),
 	)
 	if err != nil {
 		t.Fatalf("failed to insert object key for file %d: %v", fileID, err)
@@ -405,11 +406,12 @@ func insertObjectTestCollection(t *testing.T, db *sql.DB, ownerID int64) int64 {
 	t.Helper()
 
 	var collectionID int64
-	err := db.QueryRow(
+	err := db.QueryRow(database.SQL(db,
 		`INSERT INTO collections(owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, app)
 		 VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
-		 RETURNING collection_id`,
-		ownerID,
+		 RETURNING collection_id`, `INSERT INTO collections(owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, app)
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8)
+		 RETURNING collection_id`), ownerID,
 		"encrypted-key",
 		"key-nonce",
 		"Test collection",

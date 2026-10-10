@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/ente/museum/ente/base"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -19,7 +20,7 @@ func (r *PokesRepository) Create(ctx context.Context, senderSpaceID, recipientSp
 	}
 	defer tx.Rollback()
 	var friendSpaceID string
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, database.SQL(r.DB, `
         WITH locked_spaces AS MATERIALIZED (
             SELECT space_id FROM spaces
             WHERE space_id IN ($1, $2)
@@ -30,7 +31,18 @@ func (r *PokesRepository) Create(ctx context.Context, senderSpaceID, recipientSp
         WHERE space_id = $2 AND friend_space_id = $1
           AND (SELECT COUNT(*) FROM locked_spaces) = 2
         FOR SHARE
-    `, senderSpaceID, recipientSpaceID).Scan(&friendSpaceID); err != nil {
+    `, `
+        WITH locked_spaces AS MATERIALIZED (
+            SELECT space_id FROM spaces
+            WHERE space_id IN ($1, $2)
+            ORDER BY CASE WHEN space_id = $1 THEN 0 ELSE 1 END
+
+        )
+        SELECT friend_space_id FROM space_friend_shares
+        WHERE space_id = $2 AND friend_space_id = $1
+          AND (SELECT COUNT(*) FROM locked_spaces) = 2
+
+    `), senderSpaceID, recipientSpaceID).Scan(&friendSpaceID); err != nil {
 		return false, stacktrace.Propagate(err, "")
 	}
 	pokeID := base.MustNewID("wpk")

@@ -130,7 +130,7 @@ Then start it:
 
 ```sh
 cd server
-go run cmd/museum/main.go
+go run ./cmd/museum
 ```
 
 And verify it is responding:

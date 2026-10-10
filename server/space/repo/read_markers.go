@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type SpaceUnreadActivityRecord struct {
@@ -88,10 +88,7 @@ func upsertNotificationReadMarker(ctx context.Context, execer notificationReadMa
 		INSERT INTO space_notification_read_markers (viewer_space_id, friend_space_id, read_at)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (viewer_space_id, friend_space_id) DO UPDATE
-		SET read_at = GREATEST(
-			space_notification_read_markers.read_at,
-			EXCLUDED.read_at
-		)
+		SET read_at = CASE WHEN space_notification_read_markers.read_at > EXCLUDED.read_at THEN space_notification_read_markers.read_at ELSE EXCLUDED.read_at END
 	`, viewerSpaceID, friendSpaceID, readAt)
 	return stacktrace.Propagate(err, "")
 }
@@ -105,9 +102,9 @@ func (r *ReadMarkersRepository) GetLatestConversationActivityAt(ctx context.Cont
 	var readAt int64
 	if err := r.DB.QueryRowContext(ctx, `
 		SELECT activity_created_at
-		FROM (`+chatSummaryActivityRowsSQL+`) activity
+		FROM (`+chatSummarySQL(r.DB)+`) activity
 		LIMIT 1
-	`, viewerSpaceID, pq.Array([]string{friendSpaceID})).Scan(&readAt); err != nil {
+	`, viewerSpaceID, database.Array(r.DB, []string{friendSpaceID})).Scan(&readAt); err != nil {
 		if err == sql.ErrNoRows {
 			return 0, nil
 		}
@@ -121,7 +118,7 @@ func (r *ReadMarkersRepository) HasUnreadNotifications(ctx context.Context, view
 	if err := r.DB.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1
-			FROM (`+currentFriendActivityRowsSQL+`) activity
+			FROM (`+currentFriendSQL(r.DB)+`) activity
 			LEFT JOIN space_notification_read_markers nrm
 			  ON nrm.viewer_space_id = $1
 			 AND nrm.friend_space_id = activity.friend_space_id

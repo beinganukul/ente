@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"slices"
 
 	"github.com/ente/museum/ente"
@@ -56,7 +57,7 @@ func (c *CollectionController) Share(ctx *gin.Context, req ente.AlterShareReques
 		return nil, stacktrace.Propagate(err, "")
 	}
 	if collection.App == string(ente.Photos) {
-		go c.PushCtrl.NotifyAlbumShare(ctx.Request.Context(), []int64{toUserID})
+		workerjobs.Background(func() { c.PushCtrl.NotifyAlbumShare(ctx.Request.Context(), []int64{toUserID}) })
 	}
 	sharees, err := c.GetSharees(ctx, req.CollectionID, fromUserID)
 	if err != nil {
@@ -122,7 +123,7 @@ func (c *CollectionController) BatchShare(ctx *gin.Context, shares []ente.AlterS
 		for i, share := range resolvedShares {
 			recipients[i] = share.ToUserID
 		}
-		go c.PushCtrl.NotifyAlbumShare(ctx.Request.Context(), recipients)
+		workerjobs.Background(func() { c.PushCtrl.NotifyAlbumShare(ctx.Request.Context(), recipients) })
 	}
 	sharees, err := c.GetSharees(ctx, collection.ID, fromUserID)
 	if err != nil {
@@ -213,7 +214,7 @@ func (c *CollectionController) BulkShare(
 		})
 	}
 	if notify {
-		go c.PushCtrl.NotifyAlbumShare(ctx.Request.Context(), []int64{req.RecipientUserID})
+		workerjobs.Background(func() { c.PushCtrl.NotifyAlbumShare(ctx.Request.Context(), []int64{req.RecipientUserID}) })
 	}
 	return results, nil
 }
@@ -381,7 +382,7 @@ func (c *CollectionController) JoinViaLink(ctx *gin.Context, req ente.JoinCollec
 	if joinErr != nil {
 		return stacktrace.Propagate(joinErr, "")
 	}
-	go c.EmailCtrl.OnLinkJoined(collection.Owner.ID, userID, role)
+	workerjobs.Background(func() { c.EmailCtrl.OnLinkJoined(collection.Owner.ID, userID, role) })
 	return nil
 }
 

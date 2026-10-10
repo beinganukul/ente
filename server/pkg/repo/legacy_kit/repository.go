@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 
 	"github.com/ente/museum/ente"
+	"github.com/ente/museum/pkg/utils/database"
 	timeutil "github.com/ente/museum/pkg/utils/time"
 	"github.com/ente/stacktrace"
 	"github.com/google/uuid"
@@ -61,7 +62,7 @@ func (r *Repository) CreateKitWithLimit(
 	}
 	defer tx.Rollback()
 
-	if err := lockUserRow(ctx, tx, userID); err != nil {
+	if err := lockUserRow(ctx, r.DB, tx, userID); err != nil {
 		return err
 	}
 	count, err := countActiveKits(ctx, tx, userID)
@@ -131,16 +132,16 @@ func (r *Repository) DeleteKit(ctx context.Context, userID int64, kitID uuid.UUI
 	}
 	defer tx.Rollback()
 
-	if err := lockUserRow(ctx, tx, userID); err != nil {
+	if err := lockUserRow(ctx, r.DB, tx, userID); err != nil {
 		return false, err
 	}
-	if _, err := getKitForOwnerByIDForUpdate(ctx, tx, userID, kitID); err != nil {
+	if _, err := getKitForOwnerByIDForUpdate(ctx, r.DB, tx, userID, kitID); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
 		return false, err
 	}
-	if _, err := blockActiveSessionForKitTx(ctx, tx, kitID, userID); err != nil {
+	if _, err := blockActiveSessionForKitTx(ctx, r.DB, tx, kitID, userID); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -231,10 +232,10 @@ func (r *Repository) OpenOrResumeRecovery(
 		}
 		return nil, nil, "", false, stacktrace.Propagate(err, "failed to read legacy kit owner")
 	}
-	if err := lockUserRow(ctx, tx, userID); err != nil {
+	if err := lockUserRow(ctx, r.DB, tx, userID); err != nil {
 		return nil, nil, "", false, err
 	}
-	kit, err := getKitByIDForUpdate(ctx, tx, kitID)
+	kit, err := getKitByIDForUpdate(ctx, r.DB, tx, kitID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil, "", false, stacktrace.Propagate(ente.ErrNotFound, "legacy kit not found")
@@ -253,24 +254,24 @@ func (r *Repository) OpenOrResumeRecovery(
 		return nil, nil, "", false, stacktrace.Propagate(ente.NewBadRequestWithMessage("legacy kit challenge is invalid or expired"), "")
 	}
 
-	session, err := getActiveSessionByKitForUpdate(ctx, tx, kitID)
+	session, err := getActiveSessionByKitForUpdate(ctx, r.DB, tx, kitID)
 	if err != nil {
 		return nil, nil, "", false, err
 	}
 	createdSession := false
 	var rawSessionToken string
 	if session == nil {
-		session, rawSessionToken, err = createRecoverySessionTx(ctx, tx, kitID, kit.UserID, kit.NoticePeriodInHrs, initiator)
+		session, rawSessionToken, err = createRecoverySessionTx(ctx, r.DB, tx, kitID, kit.UserID, kit.NoticePeriodInHrs, initiator)
 		if err != nil {
 			return nil, nil, "", false, err
 		}
 		createdSession = true
 	} else {
-		session, err = ensureSessionReadyForUseTx(ctx, tx, session, now)
+		session, err = ensureSessionReadyForUseTx(ctx, r.DB, tx, session, now)
 		if err != nil {
 			return nil, nil, "", false, err
 		}
-		rawSessionToken, err = resumeRecoverySessionTx(ctx, tx, session.ID, initiator)
+		rawSessionToken, err = resumeRecoverySessionTx(ctx, r.DB, tx, session.ID, initiator)
 		if err != nil {
 			return nil, nil, "", false, err
 		}
@@ -296,14 +297,14 @@ func (r *Repository) GetSessionByIDAndTokenForUse(
 	}
 	defer tx.Rollback()
 
-	session, err := getSessionByIDAndTokenForUpdate(ctx, tx, sessionID, sessionToken)
+	session, err := getSessionByIDAndTokenForUpdate(ctx, r.DB, tx, sessionID, sessionToken)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
 	}
-	session, err = ensureSessionReadyForUseTx(ctx, tx, session, now)
+	session, err = ensureSessionReadyForUseTx(ctx, r.DB, tx, session, now)
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +315,7 @@ func (r *Repository) GetSessionByIDAndTokenForUse(
 }
 
 func createRecoverySessionTx(
-	ctx context.Context,
+	ctx context.Context, db *sql.DB,
 	tx *sql.Tx,
 	kitID uuid.UUID,
 	userID int64,
@@ -346,11 +347,14 @@ func createRecoverySessionTx(
 		return nil, "", err
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, database.SQL(db,
+		`
 		INSERT INTO legacy_kit_recovery_session(
 			id, kit_id, user_id, status, effective_notice_period_in_hrs, wait_till, next_reminder_at, initiators
-		) VALUES($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
-		session.ID, session.KitID, session.UserID, session.Status,
+		) VALUES($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`, `
+		INSERT INTO legacy_kit_recovery_session(
+			id, kit_id, user_id, status, effective_notice_period_in_hrs, wait_till, next_reminder_at, initiators
+		) VALUES($1, $2, $3, $4, $5, $6, $7, $8)`), session.ID, session.KitID, session.UserID, session.Status,
 		session.EffectiveNoticePeriodHrs, session.WaitTill, nullableInt64(session.NextReminderAt),
 		initiatorsJSON,
 	)
@@ -365,7 +369,7 @@ func createRecoverySessionTx(
 }
 
 func resumeRecoverySessionTx(
-	ctx context.Context,
+	ctx context.Context, db *sql.DB,
 	tx *sql.Tx,
 	sessionID uuid.UUID,
 	initiator *ente.LegacyKitRecoveryInitiator,
@@ -375,11 +379,14 @@ func resumeRecoverySessionTx(
 		if err != nil {
 			return "", err
 		}
-		_, err = tx.ExecContext(ctx, `
+		_, err = tx.ExecContext(ctx, database.SQL(db,
+			`
 			UPDATE legacy_kit_recovery_session
 			SET initiators = initiators || $1::jsonb
-			WHERE id = $2`,
-			initiatorJSON, sessionID,
+			WHERE id = $2`, `
+			UPDATE legacy_kit_recovery_session
+			SET initiators = (SELECT json_group_array(json(value)) FROM (SELECT value FROM json_each(initiators) UNION ALL SELECT value FROM json_each($1)))
+			WHERE id = $2`), initiatorJSON, sessionID,
 		)
 		if err != nil {
 			return "", stacktrace.Propagate(err, "failed to append legacy kit recovery initiator")
@@ -410,16 +417,16 @@ func (r *Repository) UpdateRecoveryNotice(ctx context.Context, userID int64, kit
 	}
 	defer tx.Rollback()
 
-	if err := lockUserRow(ctx, tx, userID); err != nil {
+	if err := lockUserRow(ctx, r.DB, tx, userID); err != nil {
 		return false, err
 	}
-	if _, err := getKitForOwnerByIDForUpdate(ctx, tx, userID, kitID); err != nil {
+	if _, err := getKitForOwnerByIDForUpdate(ctx, r.DB, tx, userID, kitID); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
 		return false, err
 	}
-	session, err := getActiveSessionByKitForUpdate(ctx, tx, kitID)
+	session, err := getActiveSessionByKitForUpdate(ctx, r.DB, tx, kitID)
 	if err != nil {
 		return false, err
 	}
@@ -452,16 +459,16 @@ func (r *Repository) BlockActiveSessionForKit(ctx context.Context, kitID uuid.UU
 	}
 	defer tx.Rollback()
 
-	if err := lockUserRow(ctx, tx, userID); err != nil {
+	if err := lockUserRow(ctx, r.DB, tx, userID); err != nil {
 		return false, err
 	}
-	if _, err := getKitForOwnerByIDForUpdate(ctx, tx, userID, kitID); err != nil {
+	if _, err := getKitForOwnerByIDForUpdate(ctx, r.DB, tx, userID, kitID); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
 		return false, err
 	}
-	updated, err := blockActiveSessionForKitTx(ctx, tx, kitID, userID)
+	updated, err := blockActiveSessionForKitTx(ctx, r.DB, tx, kitID, userID)
 	if err != nil {
 		return false, err
 	}
@@ -478,14 +485,14 @@ func (r *Repository) CompleteRecovery(
 	userID int64,
 	sessionToken string,
 ) error {
-	kit, err := getKitByIDForUpdate(ctx, tx, kitID)
+	kit, err := getKitByIDForUpdate(ctx, r.DB, tx, kitID)
 	if err != nil {
 		return err
 	}
 	if kit.IsDeleted || kit.UserID != userID {
 		return stacktrace.Propagate(ente.ErrNotFound, "legacy kit not found")
 	}
-	session, err := getSessionByIDAndTokenForUpdate(ctx, tx, sessionID, sessionToken)
+	session, err := getSessionByIDAndTokenForUpdate(ctx, r.DB, tx, sessionID, sessionToken)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return stacktrace.Propagate(ente.ErrNotFound, "legacy kit recovery session not found")
@@ -561,9 +568,10 @@ func insertKit(ctx context.Context, exec execer, userID int64, req ente.CreateLe
 	return nil
 }
 
-func lockUserRow(ctx context.Context, tx *sql.Tx, userID int64) error {
+func lockUserRow(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64) error {
 	var lockedUserID int64
-	err := tx.QueryRowContext(ctx, `SELECT user_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE`, userID).Scan(&lockedUserID)
+	err := tx.QueryRowContext(ctx, database.SQL(db,
+		`SELECT user_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE`, `SELECT user_id FROM users WHERE user_id = $1`), userID).Scan(&lockedUserID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return stacktrace.Propagate(ente.ErrNotFound, "legacy kit owner not found")
@@ -573,25 +581,37 @@ func lockUserRow(ctx context.Context, tx *sql.Tx, userID int64) error {
 	return nil
 }
 
-func getKitByIDForUpdate(ctx context.Context, tx *sql.Tx, kitID uuid.UUID) (*KitRow, error) {
-	row := tx.QueryRowContext(ctx, `
+func getKitByIDForUpdate(ctx context.Context, db *sql.DB, tx *sql.Tx, kitID uuid.UUID) (*KitRow, error) {
+	row := tx.QueryRowContext(ctx, database.SQL(db,
+		`
 		SELECT id, user_id, variant, notice_period_in_hrs, encrypted_recovery_blob, auth_public_key,
 		       encrypted_owner_blob,
 		       is_deleted, created_at, updated_at, deleted_at
 		FROM legacy_kit
 		WHERE id = $1
-		FOR UPDATE`, kitID)
+		FOR UPDATE`, `
+		SELECT id, user_id, variant, notice_period_in_hrs, encrypted_recovery_blob, auth_public_key,
+		       encrypted_owner_blob,
+		       is_deleted, created_at, updated_at, deleted_at
+		FROM legacy_kit
+		WHERE id = $1`), kitID)
 	return scanKitRow(row)
 }
 
-func getKitForOwnerByIDForUpdate(ctx context.Context, tx *sql.Tx, userID int64, kitID uuid.UUID) (*KitRow, error) {
-	row := tx.QueryRowContext(ctx, `
+func getKitForOwnerByIDForUpdate(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64, kitID uuid.UUID) (*KitRow, error) {
+	row := tx.QueryRowContext(ctx, database.SQL(db,
+		`
 		SELECT id, user_id, variant, notice_period_in_hrs, encrypted_recovery_blob, auth_public_key,
 		       encrypted_owner_blob,
 		       is_deleted, created_at, updated_at, deleted_at
 		FROM legacy_kit
 		WHERE id = $1 AND user_id = $2 AND is_deleted = FALSE
-		FOR UPDATE`, kitID, userID)
+		FOR UPDATE`, `
+		SELECT id, user_id, variant, notice_period_in_hrs, encrypted_recovery_blob, auth_public_key,
+		       encrypted_owner_blob,
+		       is_deleted, created_at, updated_at, deleted_at
+		FROM legacy_kit
+		WHERE id = $1 AND user_id = $2 AND is_deleted = FALSE`), kitID, userID)
 	return scanKitRow(row)
 }
 
@@ -611,14 +631,18 @@ func consumeChallengeTx(ctx context.Context, tx *sql.Tx, kitID uuid.UUID, challe
 	return rows > 0, nil
 }
 
-func getActiveSessionByKitForUpdate(ctx context.Context, tx *sql.Tx, kitID uuid.UUID) (*RecoverySessionRow, error) {
-	row := tx.QueryRowContext(ctx, `
+func getActiveSessionByKitForUpdate(ctx context.Context, db *sql.DB, tx *sql.Tx, kitID uuid.UUID) (*RecoverySessionRow, error) {
+	row := tx.QueryRowContext(ctx, database.SQL(db,
+		`
 		SELECT id, kit_id, user_id, status, effective_notice_period_in_hrs,
 		       wait_till, next_reminder_at, initiators, created_at, updated_at
 		FROM legacy_kit_recovery_session
 		WHERE kit_id = $1 AND status IN ($2, $3)
-		FOR UPDATE`,
-		kitID, ente.LegacyKitRecoveryStatusWaiting, ente.LegacyKitRecoveryStatusReady,
+		FOR UPDATE`, `
+		SELECT id, kit_id, user_id, status, effective_notice_period_in_hrs,
+		       wait_till, next_reminder_at, initiators, created_at, updated_at
+		FROM legacy_kit_recovery_session
+		WHERE kit_id = $1 AND status IN ($2, $3)`), kitID, ente.LegacyKitRecoveryStatusWaiting, ente.LegacyKitRecoveryStatusReady,
 	)
 	session, err := scanRecoverySessionRow(row)
 	if err != nil {
@@ -630,20 +654,25 @@ func getActiveSessionByKitForUpdate(ctx context.Context, tx *sql.Tx, kitID uuid.
 	return session, nil
 }
 
-func getSessionByIDAndTokenForUpdate(ctx context.Context, tx *sql.Tx, sessionID uuid.UUID, sessionToken string) (*RecoverySessionRow, error) {
-	row := tx.QueryRowContext(ctx, `
+func getSessionByIDAndTokenForUpdate(ctx context.Context, db *sql.DB, tx *sql.Tx, sessionID uuid.UUID, sessionToken string) (*RecoverySessionRow, error) {
+	row := tx.QueryRowContext(ctx, database.SQL(db,
+		`
 		SELECT s.id, s.kit_id, s.user_id, s.status, s.effective_notice_period_in_hrs,
 		       s.wait_till, s.next_reminder_at, s.initiators, s.created_at, s.updated_at
 		FROM legacy_kit_recovery_session s
 		JOIN legacy_kit_recovery_session_token t ON t.session_id = s.id
 		WHERE s.id = $1 AND t.token_hash = $2
-		FOR UPDATE OF s`,
-		sessionID, hashSessionToken(sessionToken))
+		FOR UPDATE OF s`, `
+		SELECT s.id, s.kit_id, s.user_id, s.status, s.effective_notice_period_in_hrs,
+		       s.wait_till, s.next_reminder_at, s.initiators, s.created_at, s.updated_at
+		FROM legacy_kit_recovery_session s
+		JOIN legacy_kit_recovery_session_token t ON t.session_id = s.id
+		WHERE s.id = $1 AND t.token_hash = $2`), sessionID, hashSessionToken(sessionToken))
 	return scanRecoverySessionRow(row)
 }
 
 func ensureSessionReadyForUseTx(
-	ctx context.Context,
+	ctx context.Context, db *sql.DB,
 	tx *sql.Tx,
 	session *RecoverySessionRow,
 	now int64,
@@ -667,22 +696,27 @@ func ensureSessionReadyForUseTx(
 	if err != sql.ErrNoRows {
 		return nil, err
 	}
-	return getSessionByIDForUpdate(ctx, tx, session.ID)
+	return getSessionByIDForUpdate(ctx, db, tx, session.ID)
 }
 
-func getSessionByIDForUpdate(ctx context.Context, tx *sql.Tx, sessionID uuid.UUID) (*RecoverySessionRow, error) {
-	row := tx.QueryRowContext(ctx, `
+func getSessionByIDForUpdate(ctx context.Context, db *sql.DB, tx *sql.Tx, sessionID uuid.UUID) (*RecoverySessionRow, error) {
+	row := tx.QueryRowContext(ctx, database.SQL(db,
+		`
 		SELECT id, kit_id, user_id, status, effective_notice_period_in_hrs,
 		       wait_till, next_reminder_at, initiators, created_at, updated_at
 		FROM legacy_kit_recovery_session
 		WHERE id = $1
-		FOR UPDATE`, sessionID)
+		FOR UPDATE`, `
+		SELECT id, kit_id, user_id, status, effective_notice_period_in_hrs,
+		       wait_till, next_reminder_at, initiators, created_at, updated_at
+		FROM legacy_kit_recovery_session
+		WHERE id = $1`), sessionID)
 	return scanRecoverySessionRow(row)
 }
 
-func blockActiveSessionForKitTx(ctx context.Context, exec execer, kitID uuid.UUID, userID int64) (bool, error) {
+func blockActiveSessionForKitTx(ctx context.Context, db *sql.DB, exec execer, kitID uuid.UUID, userID int64) (bool, error) {
 	result, err := exec.ExecContext(ctx, `
-		UPDATE legacy_kit_recovery_session s
+		UPDATE legacy_kit_recovery_session AS s
 		SET status = $1
 		FROM legacy_kit k
 		WHERE s.kit_id = $2

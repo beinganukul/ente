@@ -7,6 +7,7 @@ import (
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/ente/cast"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/random"
 	"github.com/ente/stacktrace"
 	"github.com/google/uuid"
@@ -115,7 +116,8 @@ func (r *Repository) GetCollectionAndCasterIDForToken(ctx context.Context, token
 }
 
 func (r *Repository) UpdateLastUsedAtForToken(ctx context.Context, token string) error {
-	_, err := r.DB.ExecContext(ctx, "UPDATE casting SET last_used_at = now_utc_micro_seconds() WHERE token = $1", token)
+	_, err := r.DB.ExecContext(ctx, database.SQL(r.DB,
+		"UPDATE casting SET last_used_at = now_utc_micro_seconds() WHERE token = $1", `UPDATE casting SET last_used_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER) WHERE token = $1`), token)
 	if err != nil {
 		return err
 	}

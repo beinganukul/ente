@@ -3,6 +3,7 @@ package public
 import (
 	"database/sql"
 	"errors"
+	"github.com/ente/museum/pkg/utils/database"
 	"testing"
 	"time"
 
@@ -90,7 +91,7 @@ func setupFileLinkRepositoryTest(t *testing.T) (*FileLinkRepository, *sql.DB) {
 func resetFileLinkTables(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	_, err := db.Exec(`TRUNCATE TABLE public_file_tokens_access_history, public_file_tokens RESTART IDENTITY CASCADE`)
+	_, err := db.Exec(database.SQL(db, `TRUNCATE TABLE public_file_tokens_access_history, public_file_tokens RESTART IDENTITY CASCADE`, `DELETE FROM public_file_tokens_access_history; DELETE FROM public_file_tokens`))
 	if err != nil {
 		t.Fatalf("failed to reset public file token tables: %v", err)
 	}

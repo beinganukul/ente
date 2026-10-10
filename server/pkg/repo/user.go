@@ -10,9 +10,9 @@ import (
 
 	"github.com/ente/museum/pkg/repo/passkey"
 	storageBonusRepo "github.com/ente/museum/pkg/repo/storagebonus"
+	"github.com/ente/museum/pkg/utils/database"
 	emailUtil "github.com/ente/museum/pkg/utils/email"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 
 	"github.com/ente/museum/ente"
 	"github.com/ente/museum/pkg/utils/crypto"
@@ -92,13 +92,16 @@ func (repo *UserRepository) Delete(userID int64) error {
 func (repo *UserRepository) DeleteTx(ctx context.Context, tx *sql.Tx, userID int64) (string, []RevokedToken, error) {
 	var emailHash string
 	var active bool
-	if err := tx.QueryRowContext(ctx, `SELECT email_hash, encrypted_email IS NOT NULL FROM users WHERE user_id = $1 FOR NO KEY UPDATE`, userID).Scan(&emailHash, &active); err != nil {
+	if err := tx.QueryRowContext(ctx, database.SQL(repo.DB,
+		`SELECT email_hash, encrypted_email IS NOT NULL FROM users WHERE user_id = $1 FOR NO KEY UPDATE`, `SELECT email_hash, encrypted_email IS NOT NULL FROM users WHERE user_id = $1`), userID).Scan(&emailHash, &active); err != nil {
 		return "", nil, stacktrace.Propagate(err, "failed to read user for deletion")
 	}
 	if !active {
 		return "", nil, ente.ErrUserDeleted
 	}
-	revokedTokens, err := markTokensDeleted(tx, `UPDATE tokens SET is_deleted = true WHERE user_id = $1 AND is_deleted = false RETURNING app, token_hash`, userID)
+	revokedTokens, err := markTokensDeleted(repo.DB,
+
+		tx, `UPDATE tokens SET is_deleted = true WHERE user_id = $1 AND is_deleted = false RETURNING app, token_hash`, userID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -172,7 +175,8 @@ func (repo *UserRepository) GetAll(sinceTime int64, tillTime int64) ([]ente.User
 // Effective activity is the latest account creation, token, authenticator, or
 // collection activity. Results page by user ID.
 func (repo *UserRepository) GetActiveUsersByLastActivityBefore(beforeTime int64, afterUserID int64, limit int) ([]UserInactivityCandidate, error) {
-	rows, err := repo.DB.Query(`
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`
 		SELECT
 			candidate.user_id,
 			candidate.last_activity
@@ -213,7 +217,30 @@ func (repo *UserRepository) GetActiveUsersByLastActivityBefore(beforeTime int64,
 			) candidate
 			WHERE candidate.last_activity <= $1
 		ORDER BY candidate.user_id
-		LIMIT $3`, beforeTime, afterUserID, limit)
+		LIMIT $3`, `
+		SELECT
+			candidate.user_id,
+			candidate.last_activity
+		FROM (
+			SELECT
+				u.user_id,
+				MAX(
+					u.creation_time,
+					COALESCE((SELECT MAX(last_used_at) FROM tokens WHERE user_id=u.user_id),0),
+					COALESCE((SELECT MAX(updated_at) FROM authenticator_entity WHERE user_id=u.user_id),0),
+					COALESCE((SELECT MAX(updation_time) FROM collections WHERE owner_id=u.user_id),0)
+				) AS last_activity
+			FROM users u
+
+
+
+				WHERE u.encrypted_email IS NOT NULL
+					AND u.creation_time <= $1
+					AND u.user_id > $2
+			) candidate
+			WHERE candidate.last_activity <= $1
+		ORDER BY candidate.user_id
+		LIMIT $3`), beforeTime, afterUserID, limit)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "failed to fetch inactive users")
 	}
@@ -236,7 +263,8 @@ func (repo *UserRepository) GetActiveUsersByLastActivityBefore(beforeTime int64,
 // The second return value is false when the user is no longer active.
 func (repo *UserRepository) GetLatestActivity(userID int64) (int64, bool, error) {
 	var lastActivity int64
-	err := repo.DB.QueryRow(`
+	err := repo.DB.QueryRow(database.SQL(repo.DB,
+		`
 		SELECT
 			GREATEST(
 				u.creation_time,
@@ -268,7 +296,21 @@ func (repo *UserRepository) GetLatestActivity(userID int64) (int64, bool, error)
 		) c ON TRUE
 		WHERE u.user_id = $1
 			AND u.encrypted_email IS NOT NULL
-	`, userID).Scan(&lastActivity)
+	`, `
+		SELECT
+			MAX(
+				u.creation_time,
+				COALESCE((SELECT MAX(last_used_at) FROM tokens WHERE user_id=u.user_id),0),
+				COALESCE((SELECT MAX(updated_at) FROM authenticator_entity WHERE user_id=u.user_id),0),
+				COALESCE((SELECT MAX(updation_time) FROM collections WHERE owner_id=u.user_id),0)
+			) AS last_activity
+		FROM users u
+
+
+
+		WHERE u.user_id = $1
+			AND u.encrypted_email IS NOT NULL
+`), userID).Scan(&lastActivity)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, false, nil
@@ -279,13 +321,21 @@ func (repo *UserRepository) GetLatestActivity(userID int64) (int64, bool, error)
 }
 
 func (repo *UserRepository) GetUserUsageWithSubData(ctx context.Context, userIds []int64) ([]ente.UserUsageWithSubData, error) {
-	rows, err := repo.DB.QueryContext(ctx, `select encrypted_email, email_decryption_nonce, u.user_id, coalesce(storage_consumed , 0) as storage_used, storage, expiry_time 
+	rows, err := repo.DB.QueryContext(ctx, database.SQL(repo.DB,
+		`select encrypted_email, email_decryption_nonce, u.user_id, coalesce(storage_consumed , 0) as storage_used, storage, expiry_time
 	from users as u
-	left join (select storage_consumed, user_id from usage where user_id = ANY($1)) as us 
+	left join (select storage_consumed, user_id from usage where user_id = ANY($1)) as us
 	    on us.user_id=u.user_id
-	left join (select user_id,expiry_time, storage from subscriptions where user_id = ANY($1)) as s 
+	left join (select user_id,expiry_time, storage from subscriptions where user_id = ANY($1)) as s
 	    on s.user_id = u.user_id
-			where u.user_id = ANY($1)`, pq.Array(userIds))
+			where u.user_id = ANY($1)`, `select encrypted_email, email_decryption_nonce, u.user_id, coalesce(storage_consumed , 0) as storage_used, storage, expiry_time
+	from users as u
+	left join (select storage_consumed, user_id from usage where user_id IN (SELECT value FROM json_each($1))) as us
+	    on us.user_id=u.user_id
+	left join (select user_id,expiry_time, storage from subscriptions where user_id IN (SELECT value FROM json_each($1))) as s
+	    on s.user_id = u.user_id
+			where u.user_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		userIds))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -427,10 +477,10 @@ func (repo *UserRepository) GetPublicKey(userID int64) (string, error) {
 func (repo *UserRepository) GetUsersWithIndividualPlanWhoHaveExceededStorageQuota() ([]ente.User, error) {
 	rows, err := repo.DB.Query(`
 		SELECT users.user_id, users.encrypted_email, users.email_decryption_nonce, users.email_hash, usage.storage_consumed, subscriptions.storage
-		FROM users 
-		INNER JOIN usage 
-		ON users.user_id = usage.user_id 
-		INNER JOIN subscriptions 
+		FROM users
+		INNER JOIN usage
+		ON users.user_id = usage.user_id
+		INNER JOIN subscriptions
 		ON users.user_id = subscriptions.user_id AND usage.storage_consumed > subscriptions.storage AND users.encrypted_email IS NOT NULL AND users.family_admin_id IS NULL;
 	`)
 	if err != nil {
@@ -474,7 +524,7 @@ func (repo *UserRepository) GetUsersWithIndividualPlanWhoHaveExceededStorageQuot
 
 func (repo *UserRepository) GetUsersWhoUpgradedNDaysAgo(days int) ([]ente.User, error) {
 	rows, err := repo.DB.Query(`
-        SELECT u.user_id, u.encrypted_email, u.email_decryption_nonce, u.email_hash, u.creation_time 
+        SELECT u.user_id, u.encrypted_email, u.email_decryption_nonce, u.email_hash, u.creation_time
         FROM users u
         INNER JOIN subscriptions s ON u.user_id = s.user_id
         WHERE s.upgraded_at >= $1 AND s.upgraded_at < $2 AND u.encrypted_email IS NOT NULL`,
@@ -502,8 +552,8 @@ func (repo *UserRepository) GetUsersWhoUpgradedNDaysAgo(days int) ([]ente.User, 
 }
 
 func (repo *UserRepository) SetTwoFactorSecret(userID int64, secret ente.EncryptionResult, secretHash string, recoveryEncryptedTwoFactorSecret string, recoveryTwoFactorSecretDecryptionNonce string) error {
-	_, err := repo.DB.Exec(`INSERT INTO two_factor(user_id,encrypted_two_factor_secret,two_factor_secret_decryption_nonce,two_factor_secret_hash,recovery_encrypted_two_factor_secret,recovery_two_factor_secret_decryption_nonce) 
-		VALUES($1, $2, $3, $4, $5, $6) 
+	_, err := repo.DB.Exec(`INSERT INTO two_factor(user_id,encrypted_two_factor_secret,two_factor_secret_decryption_nonce,two_factor_secret_hash,recovery_encrypted_two_factor_secret,recovery_two_factor_secret_decryption_nonce)
+		VALUES($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (user_id) DO UPDATE
 			SET encrypted_two_factor_secret = $2,
 				two_factor_secret_decryption_nonce = $3,
@@ -532,11 +582,17 @@ func (repo *UserRepository) HasPasskeys(userID int64) (hasPasskeys bool, err err
 }
 
 func (repo *UserRepository) GetEmailsFromHashes(hashes []string) ([]string, error) {
-	rows, err := repo.DB.Query(`
-		SELECT users.encrypted_email, users.email_decryption_nonce 
-		FROM users 
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`
+		SELECT users.encrypted_email, users.email_decryption_nonce
+		FROM users
 		WHERE users.email_hash = ANY($1);
-	`, pq.Array(hashes))
+	`, `
+		SELECT users.encrypted_email, users.email_decryption_nonce
+		FROM users
+		WHERE users.email_hash IN (SELECT value FROM json_each($1));
+`), database.Array(repo.DB,
+		hashes))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -562,12 +618,19 @@ func (repo *UserRepository) CountActiveUsersByEmailHashes(hashes []string) (int,
 		return 0, nil
 	}
 	var count int
-	err := repo.DB.QueryRow(`
+	err := repo.DB.QueryRow(database.SQL(repo.DB,
+		`
 		SELECT COUNT(*)
 		FROM users
 		WHERE encrypted_email IS NOT NULL
 		  AND email_hash = ANY($1);
-	`, pq.Array(hashes)).Scan(&count)
+	`, `
+		SELECT COUNT(*)
+		FROM users
+		WHERE encrypted_email IS NOT NULL
+		  AND email_hash IN (SELECT value FROM json_each($1));
+`), database.Array(repo.DB,
+		hashes)).Scan(&count)
 	if err != nil {
 		return 0, stacktrace.Propagate(err, "")
 	}
@@ -578,12 +641,19 @@ func (repo *UserRepository) GetActiveUserEmailHashes(hashes []string) ([]string,
 	if len(hashes) == 0 {
 		return []string{}, nil
 	}
-	rows, err := repo.DB.Query(`
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`
 		SELECT email_hash
 		FROM users
 		WHERE encrypted_email IS NOT NULL
 		  AND email_hash = ANY($1);
-	`, pq.Array(hashes))
+	`, `
+		SELECT email_hash
+		FROM users
+		WHERE encrypted_email IS NOT NULL
+		  AND email_hash IN (SELECT value FROM json_each($1));
+`), database.Array(repo.DB,
+		hashes))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -605,7 +675,9 @@ func (repo *UserRepository) GetActiveUserEmailHashes(hashes []string) ([]string,
 
 func (repo *UserRepository) GetActiveUsersForIds(id []int64) (map[int64]*ente.User, error) {
 	result := make(map[int64]*ente.User)
-	rows, err := repo.DB.Query(`SELECT user_id, encrypted_email, email_decryption_nonce, email_hash, creation_time FROM users WHERE  encrypted_email IS NOT NULL and user_id = ANY($1)`, pq.Array(id))
+	rows, err := repo.DB.Query(database.SQL(repo.DB,
+		`SELECT user_id, encrypted_email, email_decryption_nonce, email_hash, creation_time FROM users WHERE  encrypted_email IS NOT NULL and user_id = ANY($1)`, `SELECT user_id, encrypted_email, email_decryption_nonce, email_hash, creation_time FROM users WHERE  encrypted_email IS NOT NULL and user_id IN (SELECT value FROM json_each($1))`), database.Array(repo.DB,
+		id))
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}

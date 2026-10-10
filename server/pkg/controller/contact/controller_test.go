@@ -19,9 +19,9 @@ import (
 	contactrepo "github.com/ente/museum/pkg/repo/contact"
 	"github.com/ente/museum/pkg/utils/config"
 	"github.com/ente/museum/pkg/utils/crypto"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/museum/pkg/utils/s3config"
 	"github.com/gin-gonic/gin"
-	"github.com/lib/pq"
 	"github.com/spf13/viper"
 )
 
@@ -209,7 +209,7 @@ func mustInsertSharedCollection(t *testing.T, db *sql.DB, ownerID int64, shareeI
 	var collectionID int64
 	err := db.QueryRow(
 		`INSERT INTO collections(owner_id, encrypted_key, key_decryption_nonce, name, type, attributes, updation_time, is_deleted, app)
-		 VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING collection_id`,
 		ownerID,
 		"encrypted-key",
@@ -747,9 +747,11 @@ func TestUserAttachmentsRejectDuplicateBucketMembership(t *testing.T) {
 	mustInsertTestUser(t, db, 1)
 
 	_, err := db.Exec(
-		`INSERT INTO user_attachments(
+		database.SQL(db, `INSERT INTO user_attachments(
 		    attachment_id, user_id, attachment_type, size, latest_bucket, replicated_buckets
-		) VALUES($1, $2, $3, $4, $5, ARRAY[$6]::s3region[])`,
+		) VALUES($1, $2, $3, $4, $5, ARRAY[$6]::s3region[])`, `INSERT INTO user_attachments(
+		    attachment_id, user_id, attachment_type, size, latest_bucket, replicated_buckets
+		) VALUES($1, $2, $3, $4, $5, json_array($6))`),
 		"ua_duplicateBuckets",
 		1,
 		"profile_picture",
@@ -1083,18 +1085,21 @@ func mustInsertAttachmentRow(
 		inflightBuckets = []string{}
 	}
 	if _, err := db.Exec(
-		`INSERT INTO user_attachments(
+		database.SQL(db, `INSERT INTO user_attachments(
 		    attachment_id, user_id, attachment_type, size, latest_bucket, replicated_buckets,
 		    delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted
-		) VALUES($1, $2, $3, $4, $5, $6::s3region[], $7::s3region[], $8::s3region[], TRUE, $9)`,
+		) VALUES($1, $2, $3, $4, $5, $6::s3region[], $7::s3region[], $8::s3region[], TRUE, $9)`, `INSERT INTO user_attachments(
+		    attachment_id, user_id, attachment_type, size, latest_bucket, replicated_buckets,
+		    delete_from_buckets, inflight_rep_buckets, pending_sync, is_deleted
+		) VALUES($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9)`),
 		attachmentID,
 		userID,
 		"profile_picture",
 		128,
 		latestBucket,
-		pq.Array(replicatedBuckets),
-		pq.Array(deleteFromBuckets),
-		pq.Array(inflightBuckets),
+		database.Array(db, replicatedBuckets),
+		database.Array(db, deleteFromBuckets),
+		database.Array(db, inflightBuckets),
 		isDeleted,
 	); err != nil {
 		t.Fatalf("failed to insert attachment row: %v", err)

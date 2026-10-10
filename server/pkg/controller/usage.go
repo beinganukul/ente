@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"sync"
 
 	"github.com/ente/museum/ente"
@@ -60,9 +61,9 @@ func (c *UsageController) CanUploadFile(ctx context.Context, userID int64, size 
 		canUpload, ok := c.UploadResultCache[userID]
 		c.mu.Unlock()
 		if ok && canUpload {
-			go func() {
+			workerjobs.Background(func() {
 				_ = c.checkAndUpdateCache(ctx, userID, size, app)
-			}()
+			})
 			return nil
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	bonus "github.com/ente/museum/ente/storagebonus"
 	"github.com/ente/museum/pkg/repo"
 	"github.com/ente/museum/pkg/repo/storagebonus"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ente/stacktrace"
 )
 
@@ -21,9 +22,9 @@ type Controller struct {
 func (c *Controller) GetActiveStorageBonus(ctx context.Context, userID int64) (*bonus.ActiveStorageBonus, error) {
 	if bonus, ok := c.UserCache.GetBonus(userID); ok {
 		// Cache hit, update the cache asynchronously
-		go func() {
+		workerjobs.Background(func() {
 			_, _ = c.getAndCacheActiveStorageBonus(ctx, userID)
-		}()
+		})
 		return bonus, nil
 	}
 	return c.getAndCacheActiveStorageBonus(ctx, userID)

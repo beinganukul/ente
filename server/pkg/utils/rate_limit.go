@@ -11,3 +11,7 @@ func NewRateLimiter(interval string) *limiter.Limiter {
 	}
 	return limiter.New(newMemoryLimiterStore(), rate)
 }
+
+func NewRateLimiterForRate(rate limiter.Rate) *limiter.Limiter {
+	return limiter.New(newMemoryLimiterStore(), rate)
+}

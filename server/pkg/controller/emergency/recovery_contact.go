@@ -3,6 +3,7 @@ package emergency
 import (
 	"github.com/ente/museum/ente"
 	emergencyRepo "github.com/ente/museum/pkg/repo/emergency"
+	"github.com/ente/museum/pkg/utils/workerjobs"
 	"github.com/ente/stacktrace"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -27,7 +28,9 @@ func (c *Controller) StartRecovery(ctx *gin.Context,
 			Warn("No need to send email")
 	} else {
 		recoveryNoticeInDays := int64(contact.NoticePeriodInHrs / 24)
-		go c.sendRecoveryNotification(ctx, req.UserID, req.EmergencyContactID, ente.RecoveryStatusInitiated, &recoveryNoticeInDays)
+		workerjobs.Background(func() {
+			c.sendRecoveryNotification(ctx, req.UserID, req.EmergencyContactID, ente.RecoveryStatusInitiated, &recoveryNoticeInDays)
+		})
 	}
 	return nil
 }
@@ -55,7 +58,9 @@ func (c *Controller) RejectRecovery(ctx *gin.Context,
 	if !hasUpdate {
 		return stacktrace.Propagate(ente.NewConflictError("recovery session is no longer active"), "")
 	}
-	go c.sendRecoveryNotification(ctx, session.UserID, session.EmergencyContactID, ente.RecoveryStatusRejected, nil)
+	workerjobs.Background(func() {
+		c.sendRecoveryNotification(ctx, session.UserID, session.EmergencyContactID, ente.RecoveryStatusRejected, nil)
+	})
 	return nil
 }
 
@@ -80,7 +85,9 @@ func (c *Controller) ApproveRecovery(ctx *gin.Context,
 		log.WithField("userID", userID).WithField("req", req).
 			Warn("no row updated while approving recovery")
 	} else {
-		go c.sendRecoveryNotification(ctx, session.UserID, session.EmergencyContactID, ente.RecoveryStatusReady, nil)
+		workerjobs.Background(func() {
+			c.sendRecoveryNotification(ctx, session.UserID, session.EmergencyContactID, ente.RecoveryStatusReady, nil)
+		})
 	}
 	return nil
 }
@@ -108,7 +115,9 @@ func (c *Controller) StopRecovery(ctx *gin.Context,
 	if !hasUpdate {
 		return stacktrace.Propagate(ente.NewConflictError("recovery session is no longer active"), "")
 	}
-	go c.sendRecoveryNotification(ctx, session.UserID, session.EmergencyContactID, ente.RecoveryStatusStopped, nil)
+	workerjobs.Background(func() {
+		c.sendRecoveryNotification(ctx, session.UserID, session.EmergencyContactID, ente.RecoveryStatusStopped, nil)
+	})
 	return nil
 }
 

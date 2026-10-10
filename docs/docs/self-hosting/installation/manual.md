@@ -135,7 +135,7 @@ Values you used for `database name` and `username` correspond to the values you 
 2. Build the server. The server binary should be available as `./main` relative to `server` directory
 
     ```shell
-    go build cmd/museum/main.go
+    go build ./cmd/museum
     ```
 
 3. Create `museum.yaml` file inside `server` for configuring the needed variables. You can copy the templated configuration file for editing with ease.

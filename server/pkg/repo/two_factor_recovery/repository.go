@@ -38,10 +38,10 @@ func (r *Repository) SetPasskeyRecovery(ctx context.Context, userID int64, req *
 	if encErr != nil {
 		return stacktrace.Propagate(encErr, "failed to encrypt passkey secret")
 	}
-	_, err := r.Db.ExecContext(ctx, `INSERT INTO two_factor_recovery 
-    (user_id, server_passkey_secret_data, server_passkey_secret_nonce, user_passkey_secret_data, user_passkey_secret_nonce) 
-	VALUES ($1, $2, $3, $4, $5)  ON CONFLICT (user_id) 
-	DO UPDATE SET server_passkey_secret_data = $2, server_passkey_secret_nonce = $3, user_passkey_secret_data = $4, user_passkey_secret_nonce = $5 
+	_, err := r.Db.ExecContext(ctx, `INSERT INTO two_factor_recovery
+    (user_id, server_passkey_secret_data, server_passkey_secret_nonce, user_passkey_secret_data, user_passkey_secret_nonce)
+	VALUES ($1, $2, $3, $4, $5)  ON CONFLICT (user_id)
+	DO UPDATE SET server_passkey_secret_data = $2, server_passkey_secret_nonce = $3, user_passkey_secret_data = $4, user_passkey_secret_nonce = $5
 	WHERE two_factor_recovery.user_passkey_secret_data IS NULL AND two_factor_recovery.server_passkey_secret_data IS NULL`,
 		userID, serveEncPasskey.Cipher, serveEncPasskey.Nonce, req.UserSecretCipher, req.UserSecretNonce)
 	return err

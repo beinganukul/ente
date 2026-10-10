@@ -3,8 +3,8 @@ package embedding
 import (
 	"context"
 	"database/sql"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 type Repository struct {
@@ -27,7 +27,8 @@ func (r *Repository) GetDatacenters(ctx context.Context, fileID int64) ([]string
 	uniqueDatacenters := make(map[string]struct{})
 	for rows.Next() {
 		var datacenters []string
-		err = rows.Scan(pq.Array(&datacenters))
+		err = rows.Scan(database.Array(r.DB,
+			&datacenters))
 		if err != nil {
 			return nil, stacktrace.Propagate(err, "")
 		}
@@ -43,7 +44,8 @@ func (r *Repository) GetDatacenters(ctx context.Context, fileID int64) ([]string
 }
 
 func (r *Repository) RemoveDatacenter(ctx context.Context, fileID int64, dc string) error {
-	_, err := r.DB.ExecContext(ctx, `UPDATE embeddings SET datacenters = array_remove(datacenters, $1) WHERE file_id = $2`, dc, fileID)
+	_, err := r.DB.ExecContext(ctx, database.SQL(r.DB,
+		`UPDATE embeddings SET datacenters = array_remove(datacenters, $1) WHERE file_id = $2`, `UPDATE embeddings SET datacenters = (SELECT json_group_array(value) FROM json_each(datacenters) WHERE value IS NOT $1) WHERE file_id = $2`), dc, fileID)
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}

@@ -330,7 +330,6 @@ func spaceAppURL() string {
 }
 
 func newSpaceWebPushHTTPClient() *http.Client {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = func(
@@ -341,7 +340,7 @@ func newSpaceWebPushHTTPClient() *http.Client {
 		if err != nil {
 			return nil, err
 		}
-		addresses, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		addresses, err := lookupWebPushIPs(ctx, host)
 		if err != nil {
 			return nil, err
 		}
@@ -351,7 +350,7 @@ func newSpaceWebPushHTTPClient() *http.Client {
 			}
 		}
 		for _, address := range addresses {
-			connection, err := dialer.DialContext(
+			connection, err := dialWebPushContext(
 				ctx,
 				network,
 				net.JoinHostPort(address.String(), port),

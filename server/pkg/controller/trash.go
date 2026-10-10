@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"github.com/ente/museum/pkg/utils/workerjobs"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -98,7 +100,7 @@ func (t *TrashController) CleanupTrashedCollections() {
 		t.collectionTrashRunning = false
 	}()
 
-	itemsV3, err2 := t.QueueRepo.GetItemsReadyForDeletion(repo.TrashCollectionQueueV3, 100)
+	itemsV3, err2 := t.QueueRepo.GetItemsReadyForDeletion(repo.TrashCollectionQueueV3, workerjobs.BatchSize(100, 1))
 	if err2 != nil {
 		log.Error("Could not fetch from collection trash queue", err2)
 		return
@@ -110,6 +112,14 @@ func (t *TrashController) CleanupTrashedCollections() {
 }
 
 func (t *TrashController) ProcessEmptyTrashRequests() {
+	maxFiles := 0
+	if runtime.GOOS == "js" {
+		maxFiles = workerjobs.BatchSize(repo.TrashBatchSize, 5)
+	}
+	t.processEmptyTrashRequests(maxFiles)
+}
+
+func (t *TrashController) processEmptyTrashRequests(maxFiles int) {
 	if t.emptyTrashRunning {
 		log.Info("Already processing empty trash requests, skipping cron")
 		return
@@ -118,22 +128,34 @@ func (t *TrashController) ProcessEmptyTrashRequests() {
 	defer func() {
 		t.emptyTrashRunning = false
 	}()
-	items, err := t.QueueRepo.GetItemsReadyForDeletion(repo.TrashEmptyQueue, 100)
+	queueLimit := 100
+	if maxFiles > 0 {
+		queueLimit = 1
+	}
+	items, err := t.QueueRepo.GetItemsReadyForDeletion(repo.TrashEmptyQueue, queueLimit)
 	if err != nil {
 		log.Error("Could not fetch from emptyTrashQueue queue", err)
-	} else {
+	} else if maxFiles == 0 {
 		for _, item := range items {
-			t.emptyTrash(item, ente.Photos, repo.TrashEmptyQueue)
+			t.emptyTrash(item, ente.Photos, repo.TrashEmptyQueue, maxFiles)
 		}
 	}
 
-	itemsLocker, err2 := t.QueueRepo.GetItemsReadyForDeletion(repo.TrashEmptyLockerQueue, 100)
+	itemsLocker, err2 := t.QueueRepo.GetItemsReadyForDeletion(repo.TrashEmptyLockerQueue, queueLimit)
 	if err2 != nil {
 		log.Error("Could not fetch from emptyTrashLockerQueue queue", err2)
+	}
+	if maxFiles > 0 {
+		// Process one queue item across both apps within an alarm's subrequest budget.
+		if len(items) > 0 && (len(itemsLocker) == 0 || items[0].Id < itemsLocker[0].Id) {
+			t.emptyTrash(items[0], ente.Photos, repo.TrashEmptyQueue, maxFiles)
+		} else if len(itemsLocker) > 0 {
+			t.emptyTrash(itemsLocker[0], ente.Locker, repo.TrashEmptyLockerQueue, maxFiles)
+		}
 		return
 	}
 	for _, item := range itemsLocker {
-		t.emptyTrash(item, ente.Locker, repo.TrashEmptyLockerQueue)
+		t.emptyTrash(item, ente.Locker, repo.TrashEmptyLockerQueue, maxFiles)
 	}
 }
 
@@ -236,7 +258,7 @@ func (t *TrashController) trashCollection(item repo.QueueItem, queueName string,
 	}
 }
 
-func (t *TrashController) emptyTrash(item repo.QueueItem, app ente.App, queueName string) {
+func (t *TrashController) emptyTrash(item repo.QueueItem, app ente.App, queueName string, maxFiles int) {
 	lockName := fmt.Sprintf("EmptyTrash:%s", item.Item)
 	lockStatus, err := t.TaskLockRepo.AcquireLock(lockName, time.MicrosecondsAfterHours(1), t.HostName)
 	split := strings.Split(item.Item, repo.EmptyTrashQueueItemSeparator)
@@ -266,7 +288,7 @@ func (t *TrashController) emptyTrash(item repo.QueueItem, app ente.App, queueNam
 	}()
 
 	ctxLogger.Info("Start emptying trash")
-	fileIDs, err := t.TrashRepo.GetFilesIDsForDeletion(userID, lastUpdateAt, app)
+	fileIDs, err := t.TrashRepo.GetFilesIDsForDeletion(userID, lastUpdateAt, app, maxFiles)
 	if err != nil {
 		ctxLogger.WithError(err).Error("Failed to fetch fileIDs")
 		return
@@ -282,6 +304,10 @@ func (t *TrashController) emptyTrash(item repo.QueueItem, app ente.App, queueNam
 			ctxLogger.WithField("batchIDs", batch).WithError(err).Error("Failed while deleting batch")
 			return
 		}
+	}
+	// A full Workers batch may have more files; keep its queue item for the next alarm.
+	if maxFiles > 0 && len(fileIDs) == maxFiles {
+		return
 	}
 	err = t.QueueRepo.DeleteItem(queueName, item.Item)
 	if err != nil {

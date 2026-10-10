@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
-	"github.com/lib/pq"
 )
 
 func (m *Module) ResetUserAccess(ctx context.Context, userID int64) error {
@@ -15,11 +15,11 @@ func (m *Module) ResetUserAccess(ctx context.Context, userID int64) error {
 	}
 	defer tx.Rollback()
 
-	spaceIDs, err := getOwnedSpaceIDsTx(ctx, tx, userID)
+	spaceIDs, err := getOwnedSpaceIDsTx(ctx, m.Spaces.DB, tx, userID)
 	if err != nil {
 		return err
 	}
-	if err := resetSpaceAccessTx(ctx, tx, userID, spaceIDs); err != nil {
+	if err := resetSpaceAccessTx(ctx, m.Spaces.DB, tx, userID, spaceIDs); err != nil {
 		return err
 	}
 	return stacktrace.Propagate(tx.Commit(), "")
@@ -32,7 +32,7 @@ func (m *Module) ResetAccountDeletionAccess(ctx context.Context, userID int64) e
 	}
 	defer tx.Rollback()
 
-	spaceIDs, err := getOwnedSpaceIDsTx(ctx, tx, userID)
+	spaceIDs, err := getOwnedSpaceIDsTx(ctx, m.Spaces.DB, tx, userID)
 	if err != nil {
 		return err
 	}
@@ -48,28 +48,40 @@ func (m *Module) DeleteUserData(ctx context.Context, userID int64) error {
 		return stacktrace.Propagate(err, "")
 	}
 	defer tx.Rollback()
-
-	spaceIDs, err := getOwnedSpaceIDsTx(ctx, tx, userID)
-	if err != nil {
-		return err
-	}
-	if err := queueOwnedSpaceObjectsTx(ctx, tx, userID, spaceIDs); err != nil {
-		return err
-	}
-	if err := deleteSpaceRowsTx(ctx, tx, userID, spaceIDs); err != nil {
+	if err := m.DeleteUserDataTx(ctx, tx, userID); err != nil {
 		return err
 	}
 	return stacktrace.Propagate(tx.Commit(), "")
 }
 
-func getOwnedSpaceIDsTx(ctx context.Context, tx *sql.Tx, userID int64) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `
+func (m *Module) DeleteUserDataTx(ctx context.Context, tx *sql.Tx, userID int64) error {
+	spaceIDs, err := getOwnedSpaceIDsTx(ctx, m.Spaces.DB, tx, userID)
+	if err != nil {
+		return err
+	}
+	if err := queueOwnedSpaceObjectsTx(ctx, m.Spaces.DB, tx, userID, spaceIDs); err != nil {
+		return err
+	}
+	if err := deleteSpaceRowsTx(ctx, m.Spaces.DB, tx, userID, spaceIDs); err != nil {
+		return err
+	}
+	return nil
+}
+
+func getOwnedSpaceIDsTx(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, database.SQL(db, `
 		SELECT space_id
 		FROM spaces
 		WHERE owner_id = $1
 		ORDER BY created_at ASC
 		FOR UPDATE
-	`, userID)
+	`, `
+		SELECT space_id
+		FROM spaces
+		WHERE owner_id = $1
+		ORDER BY created_at ASC
+
+	`), userID)
 	if err != nil {
 		return nil, stacktrace.Propagate(err, "")
 	}
@@ -93,40 +105,45 @@ func resetAccountDeletionAccessTx(ctx context.Context, tx *sql.Tx, userID int64,
 	return nil
 }
 
-func resetSpaceAccessTx(ctx context.Context, tx *sql.Tx, userID int64, spaceIDs []string) error {
-	spaceIDArray := pq.Array(spaceIDs)
+func resetSpaceAccessTx(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64, spaceIDs []string) error {
+	spaceIDArray := database.Array(db, spaceIDs)
 	if err := resetAccountDeletionAccessTx(ctx, tx, userID, spaceIDs); err != nil {
 		return err
 	}
-	if err := deactivateSpaceLinksTx(ctx, tx, spaceIDs); err != nil {
+	if err := deactivateSpaceLinksTx(ctx, db, tx, spaceIDs); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM space_friend_shares WHERE space_id = ANY($1) OR friend_space_id = ANY($1)`, spaceIDArray); err != nil {
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `DELETE FROM space_friend_shares WHERE space_id = ANY($1) OR friend_space_id = ANY($1)`, `DELETE FROM space_friend_shares WHERE space_id IN (SELECT value FROM json_each($1)) OR friend_space_id IN (SELECT value FROM json_each($1))`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to delete space friend shares")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM space_friend_requests WHERE requester_space_id = ANY($1) OR target_space_id = ANY($1)`, spaceIDArray); err != nil {
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `DELETE FROM space_friend_requests WHERE requester_space_id = ANY($1) OR target_space_id = ANY($1)`, `DELETE FROM space_friend_requests WHERE requester_space_id IN (SELECT value FROM json_each($1)) OR target_space_id IN (SELECT value FROM json_each($1))`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to delete space friend requests")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM space_notification_read_markers WHERE viewer_space_id = ANY($1) OR friend_space_id = ANY($1)`, spaceIDArray); err != nil {
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `DELETE FROM space_notification_read_markers WHERE viewer_space_id = ANY($1) OR friend_space_id = ANY($1)`, `DELETE FROM space_notification_read_markers WHERE viewer_space_id IN (SELECT value FROM json_each($1)) OR friend_space_id IN (SELECT value FROM json_each($1))`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to delete space notification read markers")
 	}
 	return nil
 }
 
-func queueOwnedSpaceObjectsTx(ctx context.Context, tx *sql.Tx, userID int64, spaceIDs []string) error {
-	if _, err := tx.ExecContext(ctx, `
+func queueOwnedSpaceObjectsTx(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64, spaceIDs []string) error {
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `
 		UPDATE space_temp_objects
 		SET space_id = NULL,
 		    expires_at = now_utc_micro_seconds()
 		WHERE space_id = ANY($1)
-	`, pq.Array(spaceIDs)); err != nil {
+	`, `
+		UPDATE space_temp_objects
+		SET space_id = NULL,
+		    expires_at = CAST(unixepoch('subsec') * 1000000 AS INTEGER)
+		WHERE space_id IN (SELECT value FROM json_each($1))
+	`), database.Array(db, spaceIDs)); err != nil {
 		return stacktrace.Propagate(err, "failed to queue staged space uploads for cleanup")
 	}
 
 	if err := queueProfileObjectsTx(ctx, tx, userID); err != nil {
 		return err
 	}
-	return queuePostObjectsTx(ctx, tx, spaceIDs)
+	return queuePostObjectsTx(ctx, db, tx, spaceIDs)
 }
 
 func queueProfileObjectsTx(ctx context.Context, tx *sql.Tx, userID int64) error {
@@ -166,13 +183,18 @@ func queueProfileObjectsTx(ctx context.Context, tx *sql.Tx, userID int64) error 
 	return nil
 }
 
-func queuePostObjectsTx(ctx context.Context, tx *sql.Tx, spaceIDs []string) error {
-	rows, err := tx.QueryContext(ctx, `
+func queuePostObjectsTx(ctx context.Context, db *sql.DB, tx *sql.Tx, spaceIDs []string) error {
+	rows, err := tx.QueryContext(ctx, database.SQL(db, `
 		SELECT a.object_key, a.bucket_id, COALESCE(NULLIF(a.size, 0), 1)
 		FROM space_post_assets a
 		JOIN space_posts p ON p.post_id = a.post_id
 		WHERE p.space_id = ANY($1)
-	`, pq.Array(spaceIDs))
+	`, `
+		SELECT a.object_key, a.bucket_id, COALESCE(NULLIF(a.size, 0), 1)
+		FROM space_post_assets a
+		JOIN space_posts p ON p.post_id = a.post_id
+		WHERE p.space_id IN (SELECT value FROM json_each($1))
+	`), database.Array(db, spaceIDs))
 	if err != nil {
 		return stacktrace.Propagate(err, "")
 	}
@@ -203,32 +225,43 @@ func queuePostObjectsTx(ctx context.Context, tx *sql.Tx, spaceIDs []string) erro
 	return nil
 }
 
-func deleteSpaceRowsTx(ctx context.Context, tx *sql.Tx, userID int64, spaceIDs []string) error {
-	if err := resetSpaceAccessTx(ctx, tx, userID, spaceIDs); err != nil {
+func deleteSpaceRowsTx(ctx context.Context, db *sql.DB, tx *sql.Tx, userID int64, spaceIDs []string) error {
+	if err := resetSpaceAccessTx(ctx, db, tx, userID, spaceIDs); err != nil {
 		return err
 	}
-	spaceIDArray := pq.Array(spaceIDs)
-	if _, err := tx.ExecContext(ctx, `
+	spaceIDArray := database.Array(db, spaceIDs)
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `
 		DELETE FROM space_messages
 		WHERE sender_space_id = ANY($1)
 		   OR recipient_space_id = ANY($1)
-	`, spaceIDArray); err != nil {
+	`, `
+		DELETE FROM space_messages
+		WHERE sender_space_id IN (SELECT value FROM json_each($1))
+		   OR recipient_space_id IN (SELECT value FROM json_each($1))
+	`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to delete space messages")
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `
 		DELETE FROM space_post_assets
 		WHERE post_id IN (
 			SELECT post_id
 			FROM space_posts
 			WHERE space_id = ANY($1)
 		)
-	`, spaceIDArray); err != nil {
+	`, `
+		DELETE FROM space_post_assets
+		WHERE post_id IN (
+			SELECT post_id
+			FROM space_posts
+			WHERE space_id IN (SELECT value FROM json_each($1))
+		)
+	`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to delete space post assets")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM space_posts WHERE space_id = ANY($1)`, spaceIDArray); err != nil {
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `DELETE FROM space_posts WHERE space_id = ANY($1)`, `DELETE FROM space_posts WHERE space_id IN (SELECT value FROM json_each($1))`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to delete space posts")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM space_key_versions WHERE space_id = ANY($1)`, spaceIDArray); err != nil {
+	if _, err := tx.ExecContext(ctx, database.SQL(db, `DELETE FROM space_key_versions WHERE space_id = ANY($1)`, `DELETE FROM space_key_versions WHERE space_id IN (SELECT value FROM json_each($1))`), spaceIDArray); err != nil {
 		return stacktrace.Propagate(err, "failed to delete space key versions")
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM spaces WHERE owner_id = $1`, userID); err != nil {

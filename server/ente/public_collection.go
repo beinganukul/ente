@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/ente/museum/pkg/utils/time"
-	"github.com/ente/stacktrace"
 )
 
 type CreatePublicAccessTokenRequest struct {
@@ -212,12 +211,7 @@ func (ca AbuseReportDetails) Value() (driver.Value, error) {
 }
 
 func (ca *AbuseReportDetails) Scan(value interface{}) error {
-	b, ok := value.([]byte)
-	if !ok {
-		return stacktrace.NewError("type assertion to []byte failed")
-	}
-
-	return json.Unmarshal(b, &ca)
+	return scanJSON(value, ca)
 }
 
 func (ca ReporterAddress) Value() (driver.Value, error) {
@@ -225,10 +219,5 @@ func (ca ReporterAddress) Value() (driver.Value, error) {
 }
 
 func (ca *ReporterAddress) Scan(value interface{}) error {
-	b, ok := value.([]byte)
-	if !ok {
-		return stacktrace.NewError("type assertion to []byte failed")
-	}
-
-	return json.Unmarshal(b, &ca)
+	return scanJSON(value, ca)
 }

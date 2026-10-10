@@ -7,6 +7,7 @@ import (
 
 	"github.com/ente/museum/ente"
 	model "github.com/ente/museum/ente/authenticator"
+	"github.com/ente/museum/pkg/utils/database"
 	"github.com/ente/stacktrace"
 )
 
@@ -20,7 +21,7 @@ func (r *Repository) CreateKey(ctx context.Context, userID int64, entry model.Cr
 		entry.Header)
 
 	if err != nil {
-		if err.Error() == "pq: duplicate key value violates unique constraint \"authenticator_key_pkey\"" {
+		if database.IsUniqueViolationFor(err, "authenticator_key_pkey", "authenticator_key.user_id") {
 			return ente.NewConflictError("Key already exists")
 		}
 		return stacktrace.Propagate(err, "Failed to createTotpEntry")
