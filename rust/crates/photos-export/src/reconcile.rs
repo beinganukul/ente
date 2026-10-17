@@ -24,6 +24,7 @@ use super::{
 
 pub struct Run<'a> {
     pub root: &'a Path,
+    pub hardlinks: bool,
     pub store: &'a Mutex<Store>,
     pub cancel: &'a watch::Receiver<bool>,
     pub report: &'a (dyn Fn(&str) + Sync),
@@ -52,12 +53,7 @@ impl Run<'_> {
         Ok(())
     }
 
-    pub fn temporary(
-        &self,
-        folder: &str,
-        album: i64,
-        file: Option<i64>,
-    ) -> Result<(Location, File)> {
+    fn temporary_name(&self, folder: &str, album: i64, file: Option<i64>) -> Result<Location> {
         self.check_cancel()?;
         let temporary = Temporary {
             location: Location {
@@ -68,13 +64,23 @@ impl Run<'_> {
             file,
         };
         store::lock(self.store)?.temporary(&temporary)?;
-        let path = self.path(&temporary.location)?;
+        Ok(temporary.location)
+    }
+
+    pub fn temporary(
+        &self,
+        folder: &str,
+        album: i64,
+        file: Option<i64>,
+    ) -> Result<(Location, File)> {
+        let temporary = self.temporary_name(folder, album, file)?;
+        let path = self.path(&temporary)?;
         let file = OpenOptions::new()
             .write(true)
             .read(true)
             .create_new(true)
             .open(&path)?;
-        Ok((temporary.location, file))
+        Ok((temporary, file))
     }
 
     pub fn discard(&self, location: &Location) -> Result<()> {
@@ -249,7 +255,7 @@ impl Run<'_> {
                     size: *size,
                     hash: hash.clone(),
                     signature: signature.clone(),
-                    properties: Some(properties),
+                    properties: None,
                     intended_time: None,
                 };
                 store.save_component(&component)?;
@@ -923,11 +929,6 @@ impl Run<'_> {
             };
             after = id;
             let source: AlbumSource = serde_json::from_str(&source)?;
-            for field in &source.warnings {
-                (self.report)(&format!(
-                    "album {id}: unfamiliar metadata field {field:?}; exporting supported fields"
-                ));
-            }
             if let Err(error) = self.maintain_album(id, &source.name, false, source.metadata) {
                 self.block(id, None, error)?;
             }
@@ -1077,12 +1078,6 @@ impl Run<'_> {
                     store::lock(self.store)?.clear_pending(&pending.owner)?;
                 }
             }
-        }
-        for field in &file.warnings {
-            (self.report)(&format!(
-                "file {}: unfamiliar metadata field {field:?}; exporting supported fields",
-                file.id
-            ));
         }
         after = 0;
         loop {
@@ -1255,14 +1250,37 @@ impl Run<'_> {
                     }
                 }
             }
-            if !valid {
-                let source = prepared
-                    .components
-                    .iter_mut()
-                    .find(|source| source.role == component.role)
-                    .context("no verified original is available")?;
+            let path = self.path(&destination)?;
+            let mut source = prepared
+                .components
+                .iter_mut()
+                .find(|source| source.role == component.role);
+            let consolidate = self.hardlinks
+                && valid
+                && !same_file::is_same_file(
+                    self.path(&source.as_ref().context("missing original")?.location)?,
+                    &path,
+                )?;
+            if consolidate {
+                let previous = previous.context("missing completed original")?;
+                ensure!(
+                    fs::matches(&path, previous.size, &previous.hash, self.cancel)?,
+                    super::Conflict(format!("at {}: locally changed media", path.display()))
+                );
+            }
+            if !valid || consolidate {
+                let source = source.as_deref_mut().context("missing original")?;
                 let temporary = if source.temporary {
                     source.location.clone()
+                } else if self.hardlinks {
+                    let temporary = self.temporary_name(&album.key, album_id, Some(file.id))?;
+                    let from = self.path(&source.location)?;
+                    let to = self.path(&temporary)?;
+                    disk::hard_link(&from, &to).with_context(|| {
+                        format!("cannot link {} to {}", from.display(), path.display())
+                    })?;
+                    source.verify(self, &to)?;
+                    temporary
                 } else {
                     let (temporary, file) = self.temporary(&album.key, album_id, Some(file.id))?;
                     let mut writer = fs::HashWriter::new(file, self.cancel)?;
@@ -1304,8 +1322,11 @@ impl Run<'_> {
                 || observed != published.properties.as_ref()
                 || renamed
             {
-                published.properties =
-                    Some(fs::set_time(&self.path(&destination)?, intended_time)?);
+                published.properties = Some(if self.hardlinks {
+                    source.context("missing original")?.verify(self, &path)?
+                } else {
+                    fs::set_time(&path, intended_time)?
+                });
             }
             published.intended_time = Some(intended_time);
             published.signature = Some(prepared.signature.clone());
@@ -1495,7 +1516,6 @@ impl Run<'_> {
                 name: format!("metadata/{}.json", component.location.name),
             };
             let mut value = previous.value;
-            value["title"] = Value::String(component.location.name.clone());
             let mut layout: Vec<crate::metadata::Component> =
                 serde_json::from_value(value["ente"]["components"].clone())?;
             for identity in &mut layout {

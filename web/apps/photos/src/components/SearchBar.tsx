@@ -1,6 +1,14 @@
 import { sidebarTheme } from "@/components/sidebar/theme";
+import {
+    groupSearchOptions,
+    matchesSearchCategory,
+    searchCategories,
+    searchCategoryCounts,
+    searchCategoryForSuggestion,
+    type SearchCategory,
+} from "@/services/search/search-categories";
 import { sidebarSearchOptionsForString } from "@/services/search/sidebar-search-registry";
-import { Search01Icon } from "@hugeicons/core-free-icons";
+import { Album02Icon, Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import ArrowForwardIosIcon from "@mui/icons-material/ArrowForwardIos";
 import CalendarIcon from "@mui/icons-material/CalendarMonth";
@@ -16,6 +24,8 @@ import {
     IconButton,
     Stack,
     styled,
+    Tab,
+    Tabs,
     ThemeProvider,
     Tooltip,
     Typography,
@@ -25,10 +35,6 @@ import {
 import type { ButtonishProps } from "ente-base/components/mui";
 import { FocusVisibleButton } from "ente-base/components/mui/FocusVisibleButton";
 import { useIsSmallWidth } from "ente-base/components/utils/hooks";
-import {
-    hlsGenerationStatusSnapshot,
-    isHLSGenerationSupported,
-} from "ente-gallery/services/video";
 import { SearchPeopleList } from "ente-new/photos/components/PeopleList";
 import { ItemCard } from "ente-new/photos/components/Tiles";
 import { UnstyledButton } from "ente-new/photos/components/UnstyledButton";
@@ -37,22 +43,19 @@ import {
     useMLStatusSnapshot,
     usePeopleStateSnapshot,
 } from "ente-new/photos/components/utils/use-snapshot";
-import {
-    isMLSupported,
-    mlStatusSnapshot,
-    peopleStateSnapshot,
-} from "ente-new/photos/services/ml";
 import { searchOptionsForString } from "ente-new/photos/services/search";
 import type { SearchOption } from "ente-new/photos/services/search/types";
 import { nullToUndefined } from "ente-utils/transform";
 import { t } from "i18next";
 import pDebounce from "p-debounce";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
     components as SelectComponents,
     type ControlProps,
+    type GroupHeadingProps,
     type InputActionMeta,
     type InputProps,
+    type MenuProps,
     type OptionProps,
     type SelectInstance,
     type StylesConfig,
@@ -61,11 +64,12 @@ import AsyncSelect from "react-select/async";
 
 export interface SearchBarProps {
     isInSearchMode: boolean;
+    isSettingsOpen: boolean;
     onSelectSearchOption: (
         o: SearchOption | undefined,
         options?: { shouldExitSearchMode?: boolean },
     ) => void;
-    onSelectPeople: () => void;
+    onSelectPeople: (onNavigate: () => void) => void;
     onSelectPerson: (personID: string) => void;
 }
 
@@ -95,6 +99,8 @@ export const SearchBar: React.FC<SearchBarProps> = (props) => {
     };
 
     useEffect(() => {
+        if (props.isSettingsOpen) return;
+
         const handleKeyDown = (event: KeyboardEvent) => {
             if ((event.metaKey || event.ctrlKey) && event.key === "k") {
                 event.preventDefault();
@@ -104,39 +110,43 @@ export const SearchBar: React.FC<SearchBarProps> = (props) => {
 
         document.addEventListener("keydown", handleKeyDown);
         return () => document.removeEventListener("keydown", handleKeyDown);
-    }, []);
+    }, [props.isSettingsOpen]);
+
+    const closeButton = isSmallWidth && props.isInSearchMode && (
+        <Tooltip title={t("close")}>
+            <IconButton aria-label={t("close")} onClick={clearSearch}>
+                <CloseIcon />
+            </IconButton>
+        </Tooltip>
+    );
 
     return (
         <>
-            {props.isInSearchMode && (
-                <Tooltip title={t("close")}>
-                    <IconButton
-                        aria-label={t("close")}
-                        onClick={clearSearch}
-                        sx={{ mr: "8px" }}
+            <Stack sx={{ alignItems: "center", gap: "12px" }}>
+                {closeButton}
+                <Tooltip title={`Search (${shortcut})`}>
+                    <FocusVisibleButton
+                        color="secondary"
+                        aria-label={t("search")}
+                        aria-haspopup="dialog"
+                        disabled={props.isSettingsOpen}
+                        onClick={showSearch}
+                        sx={{
+                            minWidth: 0,
+                            width: 38,
+                            height: 38,
+                            p: 0,
+                            borderRadius: "12px",
+                        }}
                     >
-                        <CloseIcon />
-                    </IconButton>
+                        <HugeiconsIcon
+                            icon={Search01Icon}
+                            size={20}
+                            strokeWidth={1.8}
+                        />
+                    </FocusVisibleButton>
                 </Tooltip>
-            )}
-            <Tooltip title={`Search (${shortcut})`}>
-                <FocusVisibleButton
-                    color="secondary"
-                    aria-label={t("search")}
-                    aria-haspopup="dialog"
-                    onClick={showSearch}
-                    sx={{
-                        minWidth: 0,
-                        width: isSmallWidth ? 40 : 48,
-                        height: isSmallWidth ? 40 : 48,
-                        p: 0,
-                        mr: "8px",
-                        borderRadius: "16px",
-                    }}
-                >
-                    <HugeiconsIcon icon={Search01Icon} size={20} />
-                </FocusVisibleButton>
-            </Tooltip>
+            </Stack>
             <ThemeProvider theme={sidebarTheme}>
                 <Dialog
                     open={open}
@@ -145,10 +155,12 @@ export const SearchBar: React.FC<SearchBarProps> = (props) => {
                     disableRestoreFocus
                     fullWidth
                     maxWidth={false}
-                    slotProps={{
-                        backdrop: {
-                            sx: { backgroundColor: "rgba(0,0,0,0.4)" },
+                    sx={{
+                        "& .MuiBackdrop-root": {
+                            backgroundColor: "rgba(0,0,0,0.55)",
                         },
+                    }}
+                    slotProps={{
                         paper: {
                             "aria-label": t("search"),
                             sx: {
@@ -190,20 +202,24 @@ const SearchInput: React.FC<
     onClose,
 }) => {
     const selectRef = useRef<SelectInstance<SearchOption> | null>(null);
-    // Subscribe even though reads happen through peopleStateSnapshot().
-    usePeopleStateSnapshot();
     // undefined makes react-select switch from controlled to uncontrolled.
     const [value, setValue] = useState<SearchOption | null>(null);
     const [inputValue, setInputValue] = useState("");
-    const [isKeyboardNavigating, setIsKeyboardNavigating] = useState(false);
+    const [category, setCategory] = useState<SearchCategory>("all");
 
     const theme = useTheme();
 
-    const styles = useMemo(
-        () => createSelectStyles(theme, isKeyboardNavigating),
-        [theme, isKeyboardNavigating],
+    const styles = useMemo(() => createSelectStyles(theme), [theme]);
+    const components = useMemo(
+        () => ({
+            Control,
+            Input,
+            Option,
+            Menu: SearchMenu,
+            GroupHeading: SearchGroupHeading,
+        }),
+        [],
     );
-    const components = useMemo(() => ({ Control, Input, Option }), []);
 
     useEffect(() => {
         if (open) selectRef.current?.focus();
@@ -219,9 +235,11 @@ const SearchInput: React.FC<
         ) {
             setValue(null);
             setInputValue("");
+            setCategory("all");
         } else {
             setValue(value);
             setInputValue(value?.suggestion.label ?? "");
+            if (!value) setCategory("all");
         }
 
         onSelectSearchOption(nullToUndefined(value), {
@@ -255,10 +273,10 @@ const SearchInput: React.FC<
             return inputValue;
         }
         if (actionMeta.action == "input-change") {
-            setIsKeyboardNavigating(false);
             setInputValue(value);
 
             if (value === "") {
+                setCategory("all");
                 setValue(null);
                 setInputValue("");
                 onSelectSearchOption(undefined, {
@@ -278,14 +296,14 @@ const SearchInput: React.FC<
 
         setValue(null);
         setInputValue("");
+        setCategory("all");
 
         onSelectSearchOption(undefined, { shouldExitSearchMode: true });
         onClose();
     };
 
     const handleSelectPeople = () => {
-        resetSearch();
-        onSelectPeople();
+        onSelectPeople(resetSearch);
     };
 
     const handleSelectPerson = (personID: string) => {
@@ -303,14 +321,7 @@ const SearchInput: React.FC<
         }
     };
 
-    const handleBlur = () => {
-        setIsKeyboardNavigating(false);
-    };
-
     const handleKeyDown = (event: React.KeyboardEvent) => {
-        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            setIsKeyboardNavigating(true);
-        }
         if (event.key === "Escape") {
             selectRef.current?.blur();
             onClose();
@@ -318,45 +329,199 @@ const SearchInput: React.FC<
     };
 
     return (
-        <SearchInputWrapper onMouseMove={() => setIsKeyboardNavigating(false)}>
+        <SearchInputWrapper>
             <AsyncSelect
                 ref={selectRef}
-                value={value}
+                {...{ searchCategory: { category, setCategory } }}
+                value={value ? [value] : []}
                 components={components}
                 styles={styles}
                 loadOptions={loadOptions}
+                cacheOptions={open}
+                filterOption={({ data }) =>
+                    matchesSearchCategory(data, category)
+                }
                 onChange={handleChange}
                 inputValue={inputValue}
                 onInputChange={handleInputChange}
                 onKeyDown={handleKeyDown}
                 isClearable
+                tabSelectsValue={false}
                 aria-label={t("search")}
                 escapeClearsValue
-                menuIsOpen={
-                    open && (inputValue !== "" || shouldShowEmptyState(""))
-                }
+                menuIsOpen={open && !!inputValue.trim()}
                 onFocus={handleFocus}
-                onBlur={handleBlur}
                 placeholder={t("search_hint")}
                 loadingMessage={() => null}
                 noOptionsMessage={({ inputValue }) => {
-                    if (inputValue) {
-                        return t("no_results");
+                    if (inputValue.trim()) {
+                        return <SearchEmptyState />;
                     }
-                    if (shouldShowEmptyState(inputValue)) {
-                        return (
-                            <EmptyState
-                                onSelectPeople={handleSelectPeople}
-                                onSelectPerson={handleSelectPerson}
-                            />
-                        );
-                    }
-                    return null;
+                    return (
+                        <EmptyState
+                            onSelectPeople={handleSelectPeople}
+                            onSelectPerson={handleSelectPerson}
+                        />
+                    );
                 }}
             />
         </SearchInputWrapper>
     );
 };
+
+interface SearchCategoryProps {
+    searchCategory: {
+        category: SearchCategory;
+        setCategory: (category: SearchCategory) => void;
+    };
+}
+
+function SearchMenu(props: MenuProps<SearchOption, false>) {
+    const {
+        searchCategory: { category, setCategory },
+    } = props.selectProps as typeof props.selectProps & SearchCategoryProps;
+    const id = useId();
+    const hasQuery = !!props.selectProps.inputValue.trim();
+    const counts = searchCategoryCounts(
+        props.options.flatMap((option) =>
+            "options" in option ? [...option.options] : [option],
+        ),
+    );
+
+    return (
+        <SelectComponents.Menu {...props}>
+            {hasQuery && (
+                <Tabs
+                    value={category}
+                    onChange={(_, value: SearchCategory) => setCategory(value)}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => {
+                        if (event.key !== "Escape") event.stopPropagation();
+                    }}
+                    variant="scrollable"
+                    scrollButtons="auto"
+                    aria-label={t("search_results")}
+                    sx={{
+                        minHeight: 36,
+                        mb: 2,
+                        borderBottom: "1px solid",
+                        borderColor: "stroke.faint",
+                        "& .MuiTabs-indicator": { bgcolor: "text.base" },
+                        "& .MuiTab-root": {
+                            minWidth: 0,
+                            minHeight: 36,
+                            p: 0,
+                            mr: "24px",
+                            fontSize: 14,
+                            textTransform: "none",
+                            color: "text.muted",
+                        },
+                        "& .MuiTab-root.Mui-selected": {
+                            color: "text.base",
+                            fontWeight: 600,
+                        },
+                    }}
+                >
+                    {searchCategories.map((category) => (
+                        <Tab
+                            key={category}
+                            value={category}
+                            id={`${id}-${category}`}
+                            aria-controls={`${id}-results`}
+                            label={
+                                <Stack
+                                    direction="row"
+                                    sx={{ alignItems: "baseline", gap: 0.5 }}
+                                >
+                                    {t(
+                                        category === "places"
+                                            ? "search_places"
+                                            : category,
+                                    )}
+                                    {counts[category] > 0 && (
+                                        <Typography
+                                            component="span"
+                                            variant="mini"
+                                            sx={{ color: "text.muted" }}
+                                        >
+                                            {counts[category]}
+                                        </Typography>
+                                    )}
+                                </Stack>
+                            }
+                        />
+                    ))}
+                </Tabs>
+            )}
+            <div
+                id={`${id}-results`}
+                role={hasQuery ? "tabpanel" : undefined}
+                aria-labelledby={hasQuery ? `${id}-${category}` : undefined}
+            >
+                {props.children}
+            </div>
+            <Typography
+                variant="mini"
+                sx={{
+                    mt: 2,
+                    pt: "12px",
+                    borderTop: "1px solid",
+                    borderColor: "stroke.faint",
+                    color: "text.muted",
+                }}
+            >
+                {t("search_navigate_hint")}
+            </Typography>
+        </SelectComponents.Menu>
+    );
+}
+
+function SearchGroupHeading(props: GroupHeadingProps<SearchOption, false>) {
+    const {
+        searchCategory: { category },
+    } = props.selectProps as typeof props.selectProps & SearchCategoryProps;
+    if (category !== "all") return null;
+    return (
+        <SelectComponents.GroupHeading {...props}>
+            <Typography
+                variant="h6"
+                sx={{ color: "text.base", textTransform: "none", mb: 1 }}
+            >
+                {t(
+                    props.data.label === "places"
+                        ? "search_places"
+                        : props.data.label!,
+                )}
+            </Typography>
+        </SelectComponents.GroupHeading>
+    );
+}
+
+function SearchEmptyState() {
+    return (
+        <Stack
+            sx={{
+                alignItems: "center",
+                textAlign: "center",
+                gap: "16px",
+                py: "20px",
+            }}
+        >
+            <Box
+                component="img"
+                src="/images/auth-ducky.svg"
+                alt=""
+                sx={{ width: 130, height: 100, objectFit: "contain" }}
+            />
+            <Typography variant="h3" sx={{ color: "text.base" }}>
+                {t("search_no_matches")}
+            </Typography>
+            <Typography variant="small" sx={{ color: "text.muted" }}>
+                {t("search_try_another")}
+            </Typography>
+        </Stack>
+    );
+}
 
 const SearchInputWrapper = styled("div")`
     display: flex;
@@ -372,14 +537,13 @@ const loadOptions = pDebounce(async (input: string) => {
     const sidebarActions = sidebarSearchOptionsForString(input);
     const photoOptions = await searchOptionsForString(input);
 
-    return [...photoOptions, ...sidebarActions];
+    return groupSearchOptions([...photoOptions, ...sidebarActions]);
 }, 250);
 
 const createSelectStyles = (
     theme: Theme,
-    isKeyboardNavigating: boolean,
 ): StylesConfig<SearchOption, false> => ({
-    container: (style) => ({ ...style, flex: 1 }),
+    container: (style) => ({ ...style, flex: 1, minWidth: 0 }),
     control: (style) => ({
         ...style,
         minHeight: "52px",
@@ -409,45 +573,58 @@ const createSelectStyles = (
     }),
     menuList: (style) => ({
         ...style,
+        minHeight: "clamp(120px, calc(100dvh - 280px), 320px)",
+        maxHeight: "clamp(120px, calc(100dvh - 280px), 320px)",
         display: "flex",
         flexDirection: "column",
         gap: "8px",
         padding: 0,
-        scrollbarWidth: "thin",
-        scrollbarColor: `${theme.vars.palette.stroke.muted} transparent`,
-        "@supports selector(::-webkit-scrollbar)": {
-            scrollbarWidth: "auto",
-            scrollbarColor: "auto",
-            "&::-webkit-scrollbar": { width: "4px" },
-            "&::-webkit-scrollbar-track": { backgroundColor: "transparent" },
-            "&::-webkit-scrollbar-thumb": {
-                backgroundColor: theme.vars.palette.stroke.muted,
-                borderRadius: "4px",
-            },
-            "&::-webkit-scrollbar-thumb:hover": {
-                backgroundColor: theme.vars.palette.text.muted,
-            },
-            "&::-webkit-scrollbar-button": { display: "none" },
+    }),
+    group: (style) => ({
+        ...style,
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+        padding: 0,
+        "& > div:last-child": {
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
         },
+    }),
+    groupHeading: (style) => ({ ...style, margin: 0, padding: 0 }),
+    noOptionsMessage: (style) => ({
+        ...style,
+        padding: 0,
+        flex: 1,
+        display: "grid",
+        placeItems: "center",
     }),
     option: (style, { isFocused }) => ({
         ...style,
         padding: 0,
         backgroundColor: "transparent !important",
         "& :hover": { cursor: "pointer" },
-        "& .option-contents":
-            isFocused && isKeyboardNavigating
-                ? {
-                      outline: `2px solid ${theme.vars.palette.accent.main}`,
-                      outlineOffset: "-2px",
-                  }
-                : {},
+        "& .option-contents": isFocused
+            ? {
+                  outline: `2px solid color-mix(in srgb, ${theme.vars.palette.accent.main} 55%, transparent)`,
+                  outlineOffset: "-2px",
+              }
+            : {},
     }),
     placeholder: (style) => ({
         ...style,
         color: theme.vars.palette.text.muted,
         whiteSpace: "nowrap",
         overflowX: "hidden",
+    }),
+    loadingIndicator: (style) => ({
+        ...style,
+        color: theme.vars.palette.text.muted,
+        paddingRight: "16px",
+        "@media (prefers-reduced-motion: reduce)": {
+            "& span": { animation: "none" },
+        },
     }),
     dropdownIndicator: (style) => ({ ...style, display: "none" }),
     indicatorSeparator: (style) => ({ ...style, display: "none" }),
@@ -483,7 +660,12 @@ const iconForOption = (option: SearchOption | undefined) => {
         case "cameraModel":
             return <CameraIcon />;
         case "sidebarAction":
-            return <SettingsIcon />;
+            return searchCategoryForSuggestion(option.suggestion) ===
+                "albums" ? (
+                <HugeiconsIcon icon={Album02Icon} />
+            ) : (
+                <SettingsIcon />
+            );
         case "location":
         case "city":
             return <LocationIcon />;
@@ -511,35 +693,8 @@ const Input: React.FC<InputProps<SearchOption, false>> = (props) => (
     />
 );
 
-// noOptionsMessage must return null or react-select leaves an empty menu div.
-const shouldShowEmptyState = (inputValue: string) => {
-    if (inputValue) return false;
-
-    if (!isMLSupported && !isHLSGenerationSupported) {
-        return false;
-    }
-
-    const mlStatus = mlStatusSnapshot();
-    const vpStatus = hlsGenerationStatusSnapshot();
-
-    const isMLInactive =
-        !mlStatus || mlStatus.phase == "disabled" || mlStatus.phase == "done";
-    const isVideoProcessing =
-        vpStatus?.enabled && vpStatus.status == "processing";
-
-    if (isMLInactive && !isVideoProcessing) {
-        const people = peopleStateSnapshot()?.visiblePeople;
-        const hasPeople = people && people.length > 0;
-        if (!hasPeople) {
-            return false;
-        }
-    }
-
-    return true;
-};
-
 const EmptyState: React.FC<
-    Pick<SearchBarProps, "onSelectPeople" | "onSelectPerson">
+    Pick<SearchBarProps, "onSelectPerson"> & { onSelectPeople: () => void }
 > = ({ onSelectPeople, onSelectPerson }) => {
     const mlStatus = useMLStatusSnapshot();
     const people = usePeopleStateSnapshot()?.visiblePeople;
@@ -568,14 +723,13 @@ const EmptyState: React.FC<
             break;
     }
 
-    const hasPeople = people && people.length > 0;
-    if (!hasPeople && !label) {
-        return <></>;
-    }
+    const hasPeople =
+        mlStatus?.phase != "disabled" && people && people.length > 0;
+    if (!hasPeople && !label) return null;
 
     return (
         <Box sx={{ textAlign: "left" }}>
-            {people && people.length > 0 && (
+            {hasPeople && (
                 <>
                     <SearchPeopleHeader onClick={onSelectPeople} />
                     <SearchPeopleList {...{ people, onSelectPerson }} />
@@ -592,9 +746,7 @@ const EmptyState: React.FC<
 
 const SearchPeopleHeader: React.FC<ButtonishProps> = ({ onClick }) => (
     <UnstyledButton {...{ onClick }}>
-        <Typography
-            sx={{ color: "text.muted", ":hover": { color: "text.base" } }}
-        >
+        <Typography variant="h6" sx={{ color: "text.base" }}>
             {t("people")}
         </Typography>
     </UnstyledButton>
@@ -760,6 +912,8 @@ const labelForOption = (option: SearchOption) => {
             return t("people");
 
         case "sidebarAction":
-            return t("settings");
+            return searchCategoryForSuggestion(option.suggestion) === "albums"
+                ? t("album")
+                : t("settings");
     }
 };

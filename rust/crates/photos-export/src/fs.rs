@@ -34,7 +34,7 @@ impl HashWriter {
 
     pub fn finish(self) -> Result<(File, u64, String)> {
         self.file.sync_all()?;
-        Ok((self.file, self.size, b64::encode(&self.digest.finalize()?)))
+        Ok((self.file, self.size, b64::encode(&self.digest.finalize())))
     }
 }
 
@@ -44,9 +44,7 @@ impl Write for HashWriter {
             return Err(io::Error::other(super::Cancelled));
         }
         let written = self.file.write(bytes)?;
-        self.digest
-            .update(&bytes[..written])
-            .map_err(io::Error::other)?;
+        self.digest.update(&bytes[..written]);
         self.size += written as u64;
         Ok(written)
     }
@@ -66,10 +64,10 @@ pub fn hash_cancellable(path: &Path, cancel: &watch::Receiver<bool>) -> Result<(
         if read == 0 {
             break;
         }
-        digest.update(&bytes[..read])?;
+        digest.update(&bytes[..read]);
         size += read as u64;
     }
-    Ok((size, b64::encode(&digest.finalize()?)))
+    Ok((size, b64::encode(&digest.finalize())))
 }
 
 pub fn directory(root: &Path, relative: &str) -> Result<()> {
@@ -101,6 +99,10 @@ pub fn create_directory(path: &Path) -> Result<()> {
 }
 
 pub fn set_time(path: &Path, micros: i64) -> Result<Properties> {
+    let properties = Properties::read(path)?;
+    if properties.modified == i128::from(micros) * 1000 {
+        return Ok(properties);
+    }
     let duration = Duration::from_micros(micros.unsigned_abs());
     let time = if micros >= 0 {
         UNIX_EPOCH.checked_add(duration)

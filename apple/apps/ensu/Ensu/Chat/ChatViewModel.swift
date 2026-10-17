@@ -240,7 +240,10 @@ final class ChatViewModel: ObservableObject {
     func setChatActive(_ active: Bool) {
         guard chatActive != active else { return }
         chatActive = active
-        if !active { sessionSummaryTask?.cancel() }
+        if !active {
+            sessionSummaryTask?.cancel()
+            cancelChatWarmup(releaseLoadedModel: false)
+        }
         Task { await provider.setChatForeground(active) }
         if active {
             warmupSuppressed = false
@@ -323,6 +326,10 @@ final class ChatViewModel: ObservableObject {
         !deviceCapability.isChatSupported
     }
 
+    var supportsImageAttachments: Bool {
+        provider.supportsImages(modelSettings.currentSelection())
+    }
+
     var unsupportedDeviceMessage: String {
         Self.unsupportedDeviceMessage
     }
@@ -382,6 +389,19 @@ final class ChatViewModel: ObservableObject {
     var currentSession: ChatSession? {
         guard let currentSessionId else { return nil }
         return sessions.first { $0.id == currentSessionId }
+    }
+
+    private func currentSourceSelection() -> ChatSourceSelection? {
+        guard knowledgeStore.inventoryReady && notesStore.inventoryReady else { return nil }
+        return ChatSourceSelection(
+            selectedPackIDs: Set(
+                knowledgeStore.packs.filter {
+                    $0.activeIdentity != nil && !knowledgeStore.disabledIDs.contains($0.id)
+                }.map(\.id)),
+            selectedCollectionIDs: Set(
+                notesStore.collections
+                    .filter { !notesStore.disabledIDs.contains($0.id) }
+                    .map(\.id)))
     }
 
     var modelDownloadSizeText: String {
@@ -569,7 +589,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     func addImageAttachment(data: Data, fileName: String?) {
-        guard !isGenerating,
+        guard supportsImageAttachments, !isGenerating,
             !isDownloading,
             draftImageAttachmentCount < ChatAttachmentLimits.maxImagesPerMessage
         else { return }
@@ -590,7 +610,10 @@ final class ChatViewModel: ObservableObject {
                     isUploading: false
                 )
                 await MainActor.run {
-                    if self.draftImageAttachmentCount >= ChatAttachmentLimits.maxImagesPerMessage {
+                    if !self.supportsImageAttachments
+                        || self.draftImageAttachmentCount
+                            >= ChatAttachmentLimits.maxImagesPerMessage
+                    {
                         try? FileManager.default.removeItem(at: url)
                         self.isProcessingAttachments = false
                         return
@@ -722,6 +745,11 @@ final class ChatViewModel: ObservableObject {
         let sessionId = currentSessionId
         let editingId = editingMessageId
         let selection = modelSettings.currentSelection()
+        if attachments.contains(where: { $0.kind == .image }), !provider.supportsImages(selection) {
+            generationErrorMessage = ModelImagesUnsupported().localizedDescription
+            return
+        }
+        let sourceSnapshot = currentSourceSelection()
         let sendId = UUID()
         pendingSendId = sendId
         isSendPending = true
@@ -733,6 +761,16 @@ final class ChatViewModel: ObservableObject {
             }
             guard !Task.isCancelled, self.pendingSendId == sendId else { return }
             self.hasRequestedModelDownload = true
+
+            await knowledgeStore.bootstrap()
+            await notesStore.bootstrap()
+            guard !Task.isCancelled, self.pendingSendId == sendId,
+                currentSessionId == sessionId
+            else { return }
+            guard let sources = sourceSnapshot ?? currentSourceSelection() else {
+                generationErrorMessage = "Couldn’t load sources. Try sending again."
+                return
+            }
 
             do {
                 try await self.ensureChatModelReady(
@@ -760,11 +798,15 @@ final class ChatViewModel: ObservableObject {
             else { return }
             let destination = sessionId ?? self.createSessionForDraft()
             self.sendDraftMessage(
-                trimmed: trimmed, attachments: attachments, sessionId: destination)
+                trimmed: trimmed, attachments: attachments, sessionId: destination,
+                sources: sources)
         }
     }
 
-    private func sendDraftMessage(trimmed: String, attachments: [ChatAttachment], sessionId: UUID) {
+    private func sendDraftMessage(
+        trimmed: String, attachments: [ChatAttachment], sessionId: UUID,
+        sources: ChatSourceSelection
+    ) {
         let parentId: UUID? = {
             if let editingId = editingMessageId {
                 let existing = messageStore[sessionId]?.first { $0.id == editingId }
@@ -825,7 +867,7 @@ final class ChatViewModel: ObservableObject {
 
         updateSessionPreview(sessionId: sessionId, preview: trimmed, date: timestamp)
         rebuildMessages(for: sessionId)
-        startGeneration(for: userNode)
+        startGeneration(for: userNode, sources: sources)
     }
 
     func stopGenerating() {
@@ -853,7 +895,7 @@ final class ChatViewModel: ObservableObject {
         overflowBypassMessageId = pendingOverflow.messageId
         self.pendingOverflow = nil
         overflowAlert = nil
-        startGeneration(for: node)
+        startGeneration(for: node, sources: pendingOverflow.sources)
     }
 
     func cancelOverflowDialog() {
@@ -1116,6 +1158,7 @@ final class ChatViewModel: ObservableObject {
             userNode = messageStore[sessionId]?.first(where: { $0.id == parentId })
         }
         guard let userNode else { return }
+        let sourceSnapshot = currentSourceSelection()
         cancelPendingSend()
         priorGeneration?.cancel()
         priorSummary?.cancel()
@@ -1124,8 +1167,12 @@ final class ChatViewModel: ObservableObject {
             _ = await priorGeneration?.result
             _ = await priorSummary?.result
             guard let self else { return }
-            await provider.resetContext()
-            startGeneration(for: userNode)
+            if !userNode.attachments.contains(where: { $0.kind == .image })
+                || provider.supportsImages(modelSettings.currentSelection())
+            {
+                await provider.resetContext()
+            }
+            startGeneration(for: userNode, sources: sourceSnapshot)
         }
     }
 
@@ -1169,14 +1216,15 @@ final class ChatViewModel: ObservableObject {
         return session.id
     }
 
-    private func startGeneration(for userNode: MessageNode) {
+    private func startGeneration(
+        for userNode: MessageNode, sources sourceSnapshot: ChatSourceSelection?
+    ) {
         guard !isChatUnsupported else {
             showUnsupportedDeviceDialog = true
             return
         }
         cancelChatWarmup(releaseLoadedModel: false)
         let selection = modelSettings.currentSelection()
-        let prompt = buildPrompt(text: userNode.text, attachments: userNode.attachments)
         let priorGeneration = generationTask
         let priorSummary = sessionSummaryTask
         priorGeneration?.cancel()
@@ -1184,6 +1232,16 @@ final class ChatViewModel: ObservableObject {
         provider.stopGeneration(invalidatePreparation: true)
         conversationStatus = nil
         stopRequested = false
+
+        if userNode.attachments.contains(where: { $0.kind == .image }),
+            !provider.supportsImages(selection)
+        {
+            resetGenerationState()
+            generationErrorMessage = ModelImagesUnsupported().localizedDescription
+            rebuildMessages(for: userNode.sessionId)
+            return
+        }
+        let prompt = buildPrompt(text: userNode.text, attachments: userNode.attachments)
 
         let generationId = UUID()
         activeGenerationId = generationId
@@ -1211,9 +1269,19 @@ final class ChatViewModel: ObservableObject {
             await knowledgeStore.bootstrap()
             await notesStore.bootstrap()
             guard !Task.isCancelled, activeGenerationId == generationId else { return }
+            guard let sources = sourceSnapshot ?? currentSourceSelection() else {
+                generationErrorMessage = "Couldn’t load sources. Try again."
+                return
+            }
             var embeddingAssetInvalid = false
             var knowledgeHits: [GroundedExcerpt] = []
-            let enabledDatasets = knowledgeStore.enabledReadyDatasets
+            let enabledDatasets = knowledgeStore.readyDatasets.filter {
+                sources.includesPack($0.stableId)
+            }
+            let enabledCollectionIDs = Set(
+                notesStore.collections.filter {
+                    $0.eligible && sources.includesCollection($0.id)
+                }.map(\.id))
             var followup: ConversationFollowup?
             var reloaded: [GroundedExcerpt] = []
             defer { followup?.cancel() }
@@ -1251,7 +1319,7 @@ final class ChatViewModel: ObservableObject {
             let queryText = userNode.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !queryText.isEmpty,
                 (!enabledDatasets.isEmpty
-                    || notesStore.collections.contains(where: { $0.eligible }))
+                    || !enabledCollectionIDs.isEmpty)
             {
                 do {
                     let hits = try await provider.withRetrievalContext(
@@ -1264,7 +1332,8 @@ final class ChatViewModel: ObservableObject {
                             datasets: enabledDatasets, query: query,
                             maxHits: knowledgeEmbedding.maxHits
                         )
-                        let notes = try await notesStore.retrieve(query: query)
+                        let notes = try await notesStore.retrieve(
+                            query: query, collectionIDs: enabledCollectionIDs)
                         let candidates = try selectMixedGroundingCandidates(
                             packHits: packs.map {
                                 KnowledgePromptHit(datasetId: $0.dataset.stableId, hit: $0.hit)
@@ -1296,7 +1365,10 @@ final class ChatViewModel: ObservableObject {
                     try Task.checkCancellation()
                     guard activeGenerationId == generationId else { return }
                     for locator in locators {
-                        if let hit = try await reloadPassage(locator) {
+                        if let hit = try await reloadPassage(
+                            locator, datasets: enabledDatasets,
+                            collectionIDs: enabledCollectionIDs)
+                        {
                             reloaded.append(hit)
                         }
                     }
@@ -1417,7 +1489,9 @@ final class ChatViewModel: ObservableObject {
                                 generationErrorMessage = detail
                             } else if case ConversationError.Stale = error {
                                 generationErrorMessage = "Conversation changed. Retry the message."
-                            } else if error is ModelMemoryUnavailable {
+                            } else if error is ModelMemoryUnavailable
+                                || error is ModelImagesUnsupported
+                            {
                                 generationErrorMessage = error.localizedDescription
                             } else {
                                 generationErrorMessage = "Response failed. Try again."
@@ -1477,7 +1551,8 @@ final class ChatViewModel: ObservableObject {
                     case let .overflow(inputTokens, inputBudget, limits):
                         overflowBypassMessageId = nil
                         pendingOverflow = PendingOverflow(
-                            sessionId: userNode.sessionId, messageId: userNode.id)
+                            sessionId: userNode.sessionId, messageId: userNode.id,
+                            sources: sources)
                         activeGenerationId = nil
                         activeGenerationSessionId = nil
                         isGenerating = false
@@ -1517,7 +1592,8 @@ final class ChatViewModel: ObservableObject {
         hasOutput: @escaping @Sendable () -> Bool,
         onToken: @escaping @Sendable (String) -> Void
     ) async throws -> ImageChatResult {
-        try await provider.withConversationContext(
+        guard provider.supportsImages(selection) else { throw ModelImagesUnsupported() }
+        return try await provider.withConversationContext(
             selection,
             onProgress: { progress in
                 Task { @MainActor in self.handleProgress(progress) }
@@ -1641,14 +1717,17 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func reloadPassage(_ locator: PassageLocator) async throws -> GroundedExcerpt? {
+    private func reloadPassage(
+        _ locator: PassageLocator, datasets: [KnowledgeDatasetConfig],
+        collectionIDs: Set<String>
+    ) async throws -> GroundedExcerpt? {
         do {
             switch locator {
             case .ensuPack:
                 return try await knowledgeProvider.reload(
-                    locator, datasets: knowledgeStore.enabledReadyDatasets)
+                    locator, datasets: datasets)
             case .localNote(let note):
-                return try await notesStore.reload(note)
+                return try await notesStore.reload(note, collectionIDs: collectionIDs)
             }
         } catch {
             if isCancellation(error) { throw error }
@@ -2443,6 +2522,7 @@ final class ChatViewModel: ObservableObject {
     private struct PendingOverflow {
         let sessionId: UUID
         let messageId: UUID
+        let sources: ChatSourceSelection
     }
 
     private func buildPrompt(text: String, attachments: [ChatAttachment]) -> PromptResult {

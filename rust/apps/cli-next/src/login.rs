@@ -8,52 +8,60 @@ use ente_accounts::{
 };
 use ente_core::http::{Api, ApiConfig, Http};
 use serde::Deserialize;
-use url::Url;
 use uuid::Uuid;
-use zeroize::{ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
     api,
-    args::{LoginArgs, Options, Product},
+    args::{LoginArgs, Options},
     parse_json, read_input,
     vault::{Account, AccountKeys, DbKey, State, StoredSession, Vault},
 };
 
-pub async fn login(
-    product: Product,
-    args: LoginArgs,
-    selected: Option<&str>,
-    options: &Options,
-) -> Result<(State, usize)> {
-    enum Target<'a> {
-        Existing(&'a str),
-        New(String),
-    }
-
-    let target = match selected {
-        Some(name) => Target::Existing(name),
-        None => Target::New(normalize_host(
-            args.host.as_deref().unwrap_or(DEFAULT_API_ORIGIN),
-        )?),
-    };
+pub async fn login(args: LoginArgs, options: &Options) -> Result<(State, usize)> {
+    let app = args.app;
+    let host = args.host.as_deref().map(api::normalize_host).transpose()?;
     let credentials = args.input.as_deref().map(Credentials::read).transpose()?;
     let interactive = credentials.is_none() && options.can_prompt();
     ensure!(
         credentials.is_some() || interactive,
         "login requires email and password; supply --input <file> or --input -"
     );
+    let email = email(
+        args.email,
+        credentials
+            .as_ref()
+            .and_then(|input| input.email.as_deref()),
+        interactive,
+    )?;
     let vault = Vault::open()?;
-    if let Some(name) = args.name.as_deref() {
-        vault.state.check_name(name)?;
-    }
-    let (expected, origin) = match target {
-        Target::Existing(name) => {
-            let account = &vault.state.accounts[vault.state.named(name)?];
-            (Some(account.storage_id), account.origin.clone())
-        }
-        Target::New(origin) => (None, origin),
+    let index = if let Some(name) = args.name.as_deref() {
+        vault
+            .state
+            .accounts
+            .iter()
+            .position(|account| account.name == name)
+    } else if vault.state.accounts.is_empty() {
+        None
+    } else {
+        Some(vault.state.resolve(None)?)
     };
-    let (snapshot, access) = vault.release();
+    let (expected, origin) = if let Some(index) = index {
+        let account = &vault.state.accounts[index];
+        ensure!(
+            host.as_ref().is_none_or(|host| *host == account.origin),
+            "account {:?} uses {}; supply a new account name to log in to another server",
+            account.name,
+            account.origin,
+        );
+        (Some(account.storage_id), account.origin.clone())
+    } else {
+        if let Some(name) = args.name.as_deref() {
+            vault.state.check_name(name)?;
+        }
+        (None, host.unwrap_or_else(|| DEFAULT_API_ORIGIN.to_owned()))
+    };
+    let access = vault.release();
     let mut config = ApiConfig::new(origin.clone());
     config.user_agent = Some(api::USER_AGENT.into());
     Api::new(Http::new()?, config)
@@ -62,43 +70,24 @@ pub async fn login(
         .context("cannot reach the selected Ente server")?;
     let mut credentials = match credentials {
         Some(credentials) => credentials,
-        None => Credentials::prompt()?,
+        None => Credentials {
+            email: None,
+            password: Password::new()
+                .with_prompt("Password")
+                .interact_on(&Term::stderr())?,
+            otp: None,
+            totp: None,
+        },
     };
-    let client = api::accounts_client(&origin, product)?;
-    let mut authenticated = authenticate(&client, &mut credentials, interactive).await?;
+    let client = api::accounts_client(&origin, app)?;
+    let mut authenticated = authenticate(&client, email, &mut credentials, interactive).await?;
     client.set_auth_token(Some(ente_core::b64::encode_url_safe(
         &authenticated.secrets.token,
     )));
 
-    let supplied_name = args.name.is_some();
-    let requested_name = args.name;
     let mut previous_session = None;
     let result = async {
         let email = client.email().await?;
-        let snapshot_existing = snapshot.accounts.iter().position(|account| {
-            account.origin == origin && account.user_id == authenticated.user_id
-        });
-        if let Some(expected) = expected {
-            ensure!(
-                snapshot_existing
-                    .is_some_and(|index| snapshot.accounts[index].storage_id == expected),
-                "authenticated identity does not match --account"
-            );
-        }
-        let mut new_name = requested_name.unwrap_or_else(|| email.clone());
-        if snapshot_existing.is_none() {
-            while let Err(error) = snapshot.check_name(&new_name) {
-                if !interactive {
-                    return Err(error.context("supply a different local account name with --name"));
-                }
-                eprintln!("{error}");
-                new_name = Input::new()
-                    .with_prompt("Local account name")
-                    .interact_on(&Term::stderr())?;
-            }
-        }
-        drop(snapshot);
-
         let mut vault = access.open()?;
         let existing = vault
             .state
@@ -114,34 +103,22 @@ pub async fn login(
                 .context("selected account was removed during login")?;
             ensure!(
                 existing == Some(current),
-                "authenticated identity does not match --account"
+                "authenticated identity does not match the saved account"
             );
         }
-        let recovery_key = Zeroizing::new(
-            authenticated
-                .recovery_key
-                .take()
-                .context("account has no recovery key")?,
-        );
-        let identity = AccountKeys {
-            master_key: std::mem::take(&mut authenticated.secrets.master_key),
-            recovery_key: auth::recovery_key_from_mnemonic_or_hex(&recovery_key)?.into_vec(),
-            secret_key: std::mem::take(&mut authenticated.secrets.secret_key),
-        };
-        let session = StoredSession {
-            token: std::mem::take(&mut authenticated.secrets.token),
-        };
+        let (identity, session) = saved_keys(&mut authenticated)?;
         let index = if let Some(index) = existing {
             ensure!(
-                !supplied_name,
-                "account already exists; use accounts rename to change its local name"
+                expected.is_some() || args.name.is_none(),
+                "account already exists; use account rename to change its local name"
             );
             let account = &mut vault.state.accounts[index];
             account.email = email;
             account.identity = identity;
-            previous_session = account.sessions.insert(product, session);
+            previous_session = account.sessions.insert(app, session);
             index
         } else {
+            let new_name = args.name.unwrap_or_else(|| email.clone());
             vault.state.check_name(&new_name)?;
             let index = vault.state.accounts.len();
             vault.state.accounts.push(Account {
@@ -152,13 +129,11 @@ pub async fn login(
                 origin,
                 user_id: authenticated.user_id,
                 identity,
-                sessions: BTreeMap::from([(product, session)]),
+                sessions: BTreeMap::from([(app, session)]),
             });
+            vault.state.selected = Some(vault.state.accounts[index].storage_id);
             index
         };
-        if expected.is_none() {
-            vault.state.selected = Some(vault.state.accounts[index].storage_id);
-        }
         vault.save()?;
         Ok((vault.into_state(), index))
     }
@@ -177,77 +152,96 @@ pub async fn login(
         } else {
             "previous"
         };
-        eprintln!("Could not revoke the {session} login session: {error}");
+        eprintln!("Could not end the {session} login: {error}");
     }
     result
 }
 
-fn normalize_host(host: &str) -> Result<String> {
-    let input = if host.contains("://") {
-        host.to_owned()
-    } else {
-        format!("https://{host}")
-    };
-    let mut url = Url::parse(&input).context("invalid API host")?;
-    if !host.contains("://")
-        && url.host_str().is_some_and(|h| {
-            h == "localhost"
-                || h.trim_matches(['[', ']'])
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        })
-    {
-        ensure!(
-            url.set_scheme("http").is_ok(),
-            "host must be an HTTP or HTTPS origin"
-        );
-    }
-    ensure!(
-        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
-        "host must be an HTTP or HTTPS origin"
-    );
-    ensure!(
-        url.username().is_empty() && url.password().is_none(),
-        "host must not contain credentials"
-    );
-    Ok(url.origin().ascii_serialization())
-}
-
 #[derive(Deserialize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
-struct Credentials {
-    email: String,
-    password: String,
-    otp: Option<String>,
-    totp: Option<String>,
+pub(crate) struct Credentials {
+    pub email: Option<String>,
+    #[serde(default)]
+    pub password: String,
+    pub otp: Option<String>,
+    pub totp: Option<String>,
 }
 
 impl Credentials {
-    fn read(path: &Path) -> Result<Self> {
-        parse_json(&read_input(path)?)
-            .context("login input must contain email and password, with optional otp and totp")
+    pub fn read(path: &Path) -> Result<Self> {
+        let input: Self = parse_json(&read_input(path, u64::MAX)?)
+            .context("input must contain email and password strings, with optional otp and totp; --email can supply email")?;
+        ensure!(
+            !input.password.is_empty(),
+            "supply a nonempty password in --input"
+        );
+        Ok(input)
     }
+}
 
-    fn prompt() -> Result<Self> {
-        Ok(Self {
-            email: Input::new()
+pub(crate) fn email(
+    flag: Option<String>,
+    input: Option<&str>,
+    interactive: bool,
+) -> Result<String> {
+    ensure!(
+        flag.as_deref()
+            .zip(input)
+            .is_none_or(|(flag, input)| flag.trim().to_lowercase() == input.trim().to_lowercase()),
+        "--email differs from email in --input"
+    );
+    let email = match flag.or_else(|| input.map(str::to_owned)) {
+        Some(email) => email,
+        None => {
+            ensure!(interactive, "supply email through --email or --input");
+            Input::new()
                 .with_prompt("Email")
-                .interact_on(&Term::stderr())?,
-            password: Password::new()
-                .with_prompt("Password")
-                .interact_on(&Term::stderr())?,
-            otp: None,
-            totp: None,
-        })
-    }
+                .interact_on(&Term::stderr())?
+        }
+    };
+    let email = email.trim().to_lowercase();
+    ensure!(!email.is_empty(), "email cannot be empty");
+    Ok(email)
+}
+
+pub(crate) fn saved_keys(
+    authenticated: &mut AuthenticatedAccount,
+) -> Result<(AccountKeys, StoredSession)> {
+    let recovery_key = Zeroizing::new(
+        authenticated
+            .recovery_key
+            .take()
+            .context("account has no recovery key")?,
+    );
+    Ok((
+        AccountKeys {
+            master_key: std::mem::take(&mut authenticated.secrets.master_key),
+            recovery_key: auth::recovery_key_from_mnemonic_or_hex(&recovery_key)?.into_vec(),
+            secret_key: std::mem::take(&mut authenticated.secrets.secret_key),
+        },
+        StoredSession {
+            token: std::mem::take(&mut authenticated.secrets.token),
+        },
+    ))
 }
 
 async fn authenticate(
     client: &AccountsClient,
+    email: String,
     credentials: &mut Credentials,
     interactive: bool,
 ) -> Result<AuthenticatedAccount> {
-    let (mut flow, mut step) = LoginFlow::start(client, credentials.email.clone()).await?;
+    let (mut flow, mut step) = LoginFlow::prepare(client, email).await?;
+    if matches!(step, LoginStep::EmailCode) {
+        if interactive {
+            flow.resend_code(client).await?;
+        } else {
+            ensure!(
+                credentials.otp.is_some(),
+                "login requires otp in --input; request it with account request-otp --email EMAIL --purpose login"
+            );
+        }
+    }
     loop {
         step = match step {
             LoginStep::EmailCode => loop {
@@ -268,7 +262,19 @@ async fn authenticate(
                     Err(error) => return Err(error.into()),
                 }
             },
-            LoginStep::Password => flow.submit_password(client, &credentials.password).await?,
+            LoginStep::Password => loop {
+                match flow.submit_password(client, &credentials.password).await {
+                    Ok(next) => break next,
+                    Err(ente_accounts::Error::IncorrectPassword) if interactive => {
+                        eprintln!("Incorrect password. Try again.");
+                        credentials.password.zeroize();
+                        credentials.password = Password::new()
+                            .with_prompt("Password")
+                            .interact_on(&Term::stderr())?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            },
             LoginStep::SecondFactor { totp, passkey } => {
                 let use_passkey = match (totp, passkey) {
                     (true, true) if interactive => {
