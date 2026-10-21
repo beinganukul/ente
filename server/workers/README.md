@@ -167,7 +167,8 @@ For a local deployment with the same settings, install the existing dependencies
 build each app, and run `node deploy.mjs <app>` from `server/workers`. Use
 `node deploy.mjs museum` for the backend. `--dry-run` validates a bundle without
 publishing. The helper writes public configuration under ignored `.wrangler/`.
-It preserves exported `_headers` and `_redirects`; payments uses SPA fallback.
+It preserves exported `_headers` and routing rules, replacing catch-all
+`index.html` rewrites with Workers SPA fallback to avoid redirect loops.
 
 These deployments do not provision Stripe or AI providers. Configure those
 services separately before using payment or remote AI features. For account

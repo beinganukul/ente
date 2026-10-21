@@ -68,7 +68,7 @@ test("Deployment rejects unknown apps and unsafe origins or Worker names", () =>
     }
 });
 
-test("All frontend exports use absolute assets, retain native redirects, and payments has SPA fallback", () => {
+test("All frontend exports use absolute assets and only SPA apps have fallback", () => {
     assert.equal(apps.length, 16);
     for (const app of apps) {
         const config = buildConfig(app, env);
@@ -78,7 +78,17 @@ test("All frontend exports use absolute assets, retain native redirects, and pay
         assert.equal(isAbsolute(config.assets.directory), true);
         assert.equal(
             config.assets.not_found_handling,
-            app === "payments" ? "single-page-application" : "404-page",
+            [
+                "legacy",
+                "memories",
+                "paste",
+                "payments",
+                "share",
+                "space",
+                "twoof3",
+            ].includes(app)
+                ? "single-page-application"
+                : "404-page",
         );
         assert.equal(
             config.assets.directory.endsWith(
@@ -87,6 +97,47 @@ test("All frontend exports use absolute assets, retain native redirects, and pay
                     : `/web/apps/${app}/${app === "payments" ? "dist" : "out"}`,
             ),
             true,
+        );
+    }
+});
+
+test("Workers replaces index.html catch-all rewrites with SPA fallback and retains other redirects", (t) => {
+    const directory = mkdtempSync(join(tmpdir(), "ente-deploy-redirects-"));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    for (const app of apps.filter((app) => app !== "docs")) {
+        const source = new URL(
+            `../../web/apps/${app}/public/`,
+            import.meta.url,
+        );
+        const redirects = new URL("_redirects", source);
+        if (!existsSync(redirects)) continue;
+        const original = readFileSync(redirects, "utf8");
+        const config = buildConfig(app, env);
+        config.assets.directory = join(directory, app);
+        mkdirSync(config.assets.directory);
+        prepareAssets(app, config, env);
+        const generated = readFileSync(
+            join(config.assets.directory, "_redirects"),
+            "utf8",
+        );
+        const rules = (value) =>
+            value.split(/\r?\n/).filter((line) => line.trim());
+        const catchAll = (line) => /^\/\*\s+\/index\.html\s+200\s*$/.test(line);
+        assert.deepEqual(
+            rules(generated),
+            rules(original).filter((line) => !catchAll(line)),
+        );
+        if (rules(original).some(catchAll)) {
+            assert.equal(
+                config.assets.not_found_handling,
+                "single-page-application",
+            );
+        }
+        assert.equal(readFileSync(redirects, "utf8"), original);
+        prepareAssets(app, config, env);
+        assert.equal(
+            readFileSync(join(config.assets.directory, "_redirects"), "utf8"),
+            generated,
         );
     }
 });

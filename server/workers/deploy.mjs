@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
     cpSync,
+    existsSync,
     mkdirSync,
     readFileSync,
     rmSync,
@@ -29,6 +30,16 @@ export const apps = [
     "space",
     "twoof3",
     "docs",
+];
+
+const spaApps = [
+    "legacy",
+    "memories",
+    "paste",
+    "payments",
+    "share",
+    "space",
+    "twoof3",
 ];
 
 export function buildConfig(app, env = process.env) {
@@ -78,8 +89,9 @@ export function buildConfig(app, env = process.env) {
                               repository,
                               `web/apps/${app}/${app === "payments" ? "dist" : "out"}`,
                           ),
-                not_found_handling:
-                    app === "payments" ? "single-page-application" : "404-page",
+                not_found_handling: spaApps.includes(app)
+                    ? "single-page-application"
+                    : "404-page",
             },
         };
     }
@@ -142,7 +154,7 @@ export function prepareAssets(
         app === "docs" ? "docs/docs/.vitepress/dist" : `web/apps/${app}/public`,
     ),
 ) {
-    if (app !== "docs" && app !== "space") return;
+    if (app === "museum") return;
     buildConfig(app, env);
     if (app === "docs") {
         rmSync(config.assets.directory, { recursive: true, force: true });
@@ -156,6 +168,19 @@ export function prepareAssets(
         );
         return;
     }
+
+    const redirects = resolve(sourceDirectory, "_redirects");
+    if (existsSync(redirects)) {
+        // Workers rejects index.html catch-all rewrites; use its SPA fallback.
+        writeFileSync(
+            resolve(config.assets.directory, "_redirects"),
+            readFileSync(redirects, "utf8").replace(
+                /^\/\*[ \t]+\/index\.html[ \t]+200[ \t]*(?:\r?\n|$)/gm,
+                "",
+            ),
+        );
+    }
+    if (app !== "space") return;
 
     const origins = [new URL(env.ENTE_WORKERS_API_ORIGIN).origin];
     if (env.CLOUDFLARE_ACCOUNT_ID) {
