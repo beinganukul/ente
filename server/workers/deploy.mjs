@@ -171,18 +171,23 @@ export function prepareAssets(
 
     const redirects = resolve(sourceDirectory, "_redirects");
     if (existsSync(redirects)) {
+        let rules = readFileSync(redirects, "utf8")
+            .replace(/^\/\*[ \t]+\/index\.html[ \t]+200[ \t]*(?:\r?\n|$)/gm, "")
+            // Raw template brackets trigger Workers' canonical URL redirects.
+            .replaceAll("[", "%5B")
+            .replaceAll("]", "%5D");
+        if (app === "space") {
+            // Exact asset routes must take precedence over the profile wildcard.
+            const lines = rules.trim().split(/\r?\n/);
+            const pattern = (line) => /[*:]/.test(line.split(/\s+/)[0]);
+            rules =
+                [
+                    ...lines.filter((line) => !pattern(line)),
+                    ...lines.filter(pattern),
+                ].join("\n") + "\n";
+        }
         // Workers rejects index.html catch-all rewrites; use its SPA fallback.
-        writeFileSync(
-            resolve(config.assets.directory, "_redirects"),
-            readFileSync(redirects, "utf8")
-                .replace(
-                    /^\/\*[ \t]+\/index\.html[ \t]+200[ \t]*(?:\r?\n|$)/gm,
-                    "",
-                )
-                // Raw template brackets trigger Workers' canonical URL redirects.
-                .replaceAll("[", "%5B")
-                .replaceAll("]", "%5D"),
-        );
+        writeFileSync(resolve(config.assets.directory, "_redirects"), rules);
     }
     if (app !== "space") return;
 

@@ -123,10 +123,16 @@ test("Workers replaces index.html catch-all rewrites with SPA fallback and retai
         const rules = (value) =>
             value.split(/\r?\n/).filter((line) => line.trim());
         const catchAll = (line) => /^\/\*\s+\/index\.html\s+200\s*$/.test(line);
-        assert.deepEqual(
-            rules(decodeURI(generated)),
-            rules(original).filter((line) => !catchAll(line)),
-        );
+        const expected = rules(original).filter((line) => !catchAll(line));
+        if (app === "space") {
+            const pattern = (line) => /[*:]/.test(line.split(/\s+/)[0]);
+            assert.deepEqual(rules(decodeURI(generated)), [
+                ...expected.filter((line) => !pattern(line)),
+                ...expected.filter(pattern),
+            ]);
+        } else {
+            assert.deepEqual(rules(decodeURI(generated)), expected);
+        }
         if (app === "space") {
             assert.match(
                 generated,
@@ -162,6 +168,9 @@ test("Space direct links serve exported templates without canonical redirect loo
         const fixtures = [
             ["index.html", "home"],
             ["profile-link.html", "profile"],
+            ["ios-pwa.js", "console.log('pwa');"],
+            ["sw.js", "console.log('service-worker');"],
+            ["manifest.webmanifest", '{"name":"Space"}'],
             ["app/messages/[spaceId].html", "message"],
             ["app/posts/[spaceId]/[postId].html", "post"],
         ];
@@ -181,6 +190,9 @@ test("Space direct links serve exported templates without canonical redirect loo
         for (const [path, body] of [
             ["/", "home"],
             ["/alice", "profile"],
+            ["/ios-pwa.js", "console.log('pwa');"],
+            ["/sw.js", "console.log('service-worker');"],
+            ["/manifest.webmanifest", '{"name":"Space"}'],
             ["/app/messages/space-123", "message"],
             ["/app/posts/space-123/post-456", "post"],
         ]) {
