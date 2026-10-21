@@ -174,10 +174,14 @@ export function prepareAssets(
         // Workers rejects index.html catch-all rewrites; use its SPA fallback.
         writeFileSync(
             resolve(config.assets.directory, "_redirects"),
-            readFileSync(redirects, "utf8").replace(
-                /^\/\*[ \t]+\/index\.html[ \t]+200[ \t]*(?:\r?\n|$)/gm,
-                "",
-            ),
+            readFileSync(redirects, "utf8")
+                .replace(
+                    /^\/\*[ \t]+\/index\.html[ \t]+200[ \t]*(?:\r?\n|$)/gm,
+                    "",
+                )
+                // Raw template brackets trigger Workers' canonical URL redirects.
+                .replaceAll("[", "%5B")
+                .replaceAll("]", "%5D"),
         );
     }
     if (app !== "space") return;

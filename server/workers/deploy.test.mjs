@@ -124,9 +124,19 @@ test("Workers replaces index.html catch-all rewrites with SPA fallback and retai
             value.split(/\r?\n/).filter((line) => line.trim());
         const catchAll = (line) => /^\/\*\s+\/index\.html\s+200\s*$/.test(line);
         assert.deepEqual(
-            rules(generated),
+            rules(decodeURI(generated)),
             rules(original).filter((line) => !catchAll(line)),
         );
+        if (app === "space") {
+            assert.match(
+                generated,
+                /\/app\/messages\/\*\s+\/app\/messages\/%5BspaceId%5D\s+200/,
+            );
+            assert.match(
+                generated,
+                /\/app\/posts\/\*\s+\/app\/posts\/%5BspaceId%5D\/%5BpostId%5D\s+200/,
+            );
+        }
         if (rules(original).some(catchAll)) {
             assert.equal(
                 config.assets.not_found_handling,
@@ -139,6 +149,55 @@ test("Workers replaces index.html catch-all rewrites with SPA fallback and retai
             readFileSync(join(config.assets.directory, "_redirects"), "utf8"),
             generated,
         );
+    }
+});
+
+test("Space direct links serve exported templates without canonical redirect loops", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ente-deploy-space-routing-"));
+    let worker;
+    try {
+        const config = buildConfig("space", env);
+        config.name = "ente-deploy-routing-test";
+        config.assets.directory = join(directory, "assets");
+        const fixtures = [
+            ["index.html", "home"],
+            ["profile-link.html", "profile"],
+            ["app/messages/[spaceId].html", "message"],
+            ["app/posts/[spaceId]/[postId].html", "post"],
+        ];
+        for (const [filename, body] of fixtures) {
+            const target = join(config.assets.directory, filename);
+            mkdirSync(join(target, ".."), { recursive: true });
+            writeFileSync(target, body);
+        }
+        prepareAssets("space", config, env);
+        const filename = join(directory, "wrangler.json");
+        writeFileSync(filename, JSON.stringify(config));
+        const { unstable_startWorker } = await import("wrangler");
+        worker = await unstable_startWorker({
+            config: filename,
+            dev: { persist: false },
+        });
+        for (const [path, body] of [
+            ["/", "home"],
+            ["/alice", "profile"],
+            ["/app/messages/space-123", "message"],
+            ["/app/posts/space-123/post-456", "post"],
+        ]) {
+            const response = await worker.fetch(`http://localhost${path}`, {
+                redirect: "manual",
+                headers: { "Sec-Fetch-Mode": "navigate" },
+            });
+            assert.equal(
+                response.status,
+                200,
+                `${path}: ${response.headers.get("location")}`,
+            );
+            assert.equal(await response.text(), body);
+        }
+    } finally {
+        await worker?.dispose();
+        rmSync(directory, { recursive: true, force: true });
     }
 });
 
