@@ -124,15 +124,11 @@ test("Workers replaces index.html catch-all rewrites with SPA fallback and retai
             value.split(/\r?\n/).filter((line) => line.trim());
         const catchAll = (line) => /^\/\*\s+\/index\.html\s+200\s*$/.test(line);
         const expected = rules(original).filter((line) => !catchAll(line));
-        if (app === "space") {
-            const pattern = (line) => /[*:]/.test(line.split(/\s+/)[0]);
-            assert.deepEqual(rules(decodeURI(generated)), [
-                ...expected.filter((line) => !pattern(line)),
-                ...expected.filter(pattern),
-            ]);
-        } else {
-            assert.deepEqual(rules(decodeURI(generated)), expected);
-        }
+        const pattern = (line) => /[*:]/.test(line.split(/\s+/)[0]);
+        assert.deepEqual(rules(decodeURI(generated)), [
+            ...expected.filter((line) => !pattern(line)),
+            ...expected.filter(pattern),
+        ]);
         if (app === "space") {
             assert.match(
                 generated,
@@ -209,6 +205,55 @@ test("Space direct links serve exported templates without canonical redirect loo
         }
     } finally {
         await worker?.dispose();
+        rmSync(directory, { recursive: true, force: true });
+    }
+});
+
+test("Album and embed exports serve robots.txt before public-link rewrites", async () => {
+    const directory = mkdtempSync(
+        join(tmpdir(), "ente-deploy-public-routing-"),
+    );
+    try {
+        const { unstable_startWorker } = await import("wrangler");
+        for (const app of ["albums", "embed"]) {
+            const config = buildConfig(app, env);
+            config.assets.directory = join(directory, app);
+            mkdirSync(config.assets.directory);
+            writeFileSync(
+                join(config.assets.directory, "index.html"),
+                "public album",
+            );
+            writeFileSync(
+                join(config.assets.directory, "robots.txt"),
+                "User-agent: *\nDisallow: /\n",
+            );
+            prepareAssets(app, config, env);
+            const filename = join(directory, `${app}.json`);
+            writeFileSync(filename, JSON.stringify(config));
+            const worker = await unstable_startWorker({
+                config: filename,
+                dev: { persist: false },
+            });
+            try {
+                const robots = await worker.fetch(
+                    "http://localhost/robots.txt",
+                );
+                assert.equal(robots.status, 200);
+                assert.equal(
+                    await robots.text(),
+                    "User-agent: *\nDisallow: /\n",
+                );
+                const link = await worker.fetch(
+                    "http://localhost/public-token",
+                    { redirect: "manual" },
+                );
+                assert.equal(link.status, 200);
+                assert.equal(await link.text(), "public album");
+            } finally {
+                await worker.dispose();
+            }
+        }
+    } finally {
         rmSync(directory, { recursive: true, force: true });
     }
 });

@@ -176,8 +176,8 @@ export function prepareAssets(
             // Raw template brackets trigger Workers' canonical URL redirects.
             .replaceAll("[", "%5B")
             .replaceAll("]", "%5D");
-        if (app === "space") {
-            // Exact asset routes must take precedence over the profile wildcard.
+        if (rules.trim()) {
+            // Exact asset routes must take precedence over wildcard routes.
             const lines = rules.trim().split(/\r?\n/);
             const pattern = (line) => /[*:]/.test(line.split(/\s+/)[0]);
             rules =

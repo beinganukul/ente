@@ -129,10 +129,12 @@ jobs:
                   for path in /app/messages/deployment-route-check /app/posts/deployment-route-check/deployment-route-check; do
                       curl --fail --location --max-redirs 5 --silent --show-error --retry 5 --retry-delay 5 --header 'Sec-Fetch-Mode: navigate' --output /dev/null "https://${ENTE_WEB_WORKER_PREFIX}-space.${ENTE_WORKERS_SUBDOMAIN}.workers.dev${path}"
                   done
-                  for path in /ios-pwa.js /sw.js /manifest.webmanifest /manifest-public.webmanifest; do
-                      content_type=$(curl --fail --silent --show-error --retry 5 --retry-delay 5 --write-out '%{content_type}' --output /dev/null "https://${ENTE_WEB_WORKER_PREFIX}-space.${ENTE_WORKERS_SUBDOMAIN}.workers.dev${path}")
+                  for asset in space/ios-pwa.js space/sw.js space/manifest.webmanifest space/manifest-public.webmanifest albums/robots.txt embed/robots.txt; do
+                      app=${asset%%/*}
+                      path=/${asset#*/}
+                      content_type=$(curl --fail --silent --show-error --retry 5 --retry-delay 5 --write-out '%{content_type}' --output /dev/null "https://${ENTE_WEB_WORKER_PREFIX}-${app}.${ENTE_WORKERS_SUBDOMAIN}.workers.dev${path}")
                       if [[ "$content_type" == text/html* ]]; then
-                          echo "::error::Space asset $path returned HTML."
+                          echo "::error::Frontend asset $asset returned HTML."
                           exit 1
                       fi
                   done
