@@ -13,6 +13,7 @@ permissions:
 
 jobs:
     publish:
+        if: github.repository == 'ente/ente'
         runs-on: ubuntu-latest
         steps:
             - name: Determine commit from prod museum
