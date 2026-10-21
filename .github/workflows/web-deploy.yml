@@ -11,6 +11,7 @@ permissions:
 
 jobs:
     deploy:
+        if: github.repository == 'ente/ente'
         runs-on: ubuntu-latest
         environment: production
 

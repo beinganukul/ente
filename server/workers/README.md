@@ -130,6 +130,50 @@ account. Store the key/secret in Worker secrets, never in the public example.
 
 ## Migrate and deploy
 
+### Deploy the full stack on Workers
+
+The `Deploy (Cloudflare Workers)` GitHub workflow publishes Museum, all 15 web
+apps, and the documentation site to Workers. Frontends use Workers Static
+Assets with separate origins; no Pages project or Next.js server adapter is
+required. The inherited Pages publishing workflows run only in `ente/ente`.
+
+In your fork's Actions settings, add `CLOUDFLARE_API_TOKEN` as a secret using
+Cloudflare's **Edit Cloudflare Workers** template, scoped to your account and
+any zone used by Museum's custom domain. Add these repository variables:
+
+| Variable | Value |
+| --- | --- |
+| `CLOUDFLARE_ACCOUNT_ID` | Your existing Cloudflare account ID |
+| `ENTE_WORKERS_API_ORIGIN` | Museum's HTTPS origin, without a path |
+| `ENTE_WORKERS_SUBDOMAIN` | Your account's workers.dev subdomain |
+| `ENTE_WEB_WORKER_PREFIX` | `ente-web`, or your own Worker name prefix |
+| `ENTE_WORKERS_DEPLOY` | `true`, after credentials and Museum are configured |
+
+Push relevant changes to `main`, or dispatch **Deploy (Cloudflare Workers)** on
+`main`. The workflow builds all exports before publishing, retains Museum's
+Worker name and Durable Object migration history, and leaves existing secrets
+in Cloudflare. Provision the database, storage, SMTP, and encryption keys first
+using the steps below; the workflow does not recreate those resources or run
+database migrations.
+
+Each frontend is served at
+`https://<prefix>-<app>.<subdomain>.workers.dev`, including `photos`, `auth`,
+`accounts`, `albums`, `cast`, `embed`, `ensu`, `legacy`, `locker`, `memories`,
+`paste`, `payments`, `share`, `space`, `twoof3`, and `docs`. Builds use Museum's
+origin for both Next.js and Vite API settings. Museum's public app URLs are
+updated to these frontend origins.
+
+For a local deployment with the same settings, install the existing dependencies,
+build each app, and run `node deploy.mjs <app>` from `server/workers`. Use
+`node deploy.mjs museum` for the backend. `--dry-run` validates a bundle without
+publishing. The helper writes public configuration under ignored `.wrangler/`.
+It preserves exported `_headers` and `_redirects`; payments uses SPA fallback.
+
+These deployments do not provision Stripe or AI providers. Configure those
+services separately before using payment or remote AI features. For account
+passkeys, configure the accounts Worker origin and a compatible WebAuthn RP ID;
+preserve any existing RP ID and migration settings when moving accounts domains.
+
 Apply database migrations using the native command with the same database
 configuration **before** deploying. The Worker checks that the migration table
 exists, is clean, and includes this build's latest migration; it does not run migrations itself.

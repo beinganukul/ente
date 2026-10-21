@@ -1,0 +1,128 @@
+name: "Deploy (Cloudflare Workers)"
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - ".github/workflows/cloudflare-workers-deploy.yml"
+            - "docs/**"
+            - "rust/**"
+            - "server/**"
+            - "web/**"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: cloudflare-workers-production
+    cancel-in-progress: false
+
+jobs:
+    deploy:
+        if: github.ref == 'refs/heads/main' && vars.ENTE_WORKERS_DEPLOY == 'true'
+        runs-on: ubuntu-latest
+        environment: production
+        env:
+            ENTE_WORKERS_API_ORIGIN: ${{ vars.ENTE_WORKERS_API_ORIGIN }}
+            ENTE_WORKERS_SUBDOMAIN: ${{ vars.ENTE_WORKERS_SUBDOMAIN }}
+            ENTE_WEB_WORKER_PREFIX: ${{ vars.ENTE_WEB_WORKER_PREFIX || 'ente-web' }}
+            NEXT_PUBLIC_ENTE_ENDPOINT: ${{ vars.ENTE_WORKERS_API_ORIGIN }}
+            VITE_ENTE_ENDPOINT: ${{ vars.ENTE_WORKERS_API_ORIGIN }}
+
+        steps:
+            - name: Check deployment credentials
+              env:
+                  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+              run: |
+                  for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN ENTE_WORKERS_API_ORIGIN ENTE_WORKERS_SUBDOMAIN; do
+                      if [ -z "${!name}" ]; then
+                          echo "::error::Configure $name before enabling ENTE_WORKERS_DEPLOY."
+                          exit 1
+                      fi
+                  done
+
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Setup Node.js
+              uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+              with:
+                  node-version: 24
+                  cache: npm
+                  cache-dependency-path: |
+                      docs/package-lock.json
+                      server/workers/package-lock.json
+                      web/package-lock.json
+
+            - name: Setup Go
+              uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+              with:
+                  go-version-file: server/go.mod
+                  cache-dependency-path: server/go.sum
+
+            - name: Setup Rust Wasm targets
+              run: |
+                  rustup target add wasm32-unknown-unknown
+                  rustup toolchain install nightly-2026-08-13 --profile minimal --component rust-src --target wasm32-unknown-unknown
+
+            - name: Cache Rust
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  workspaces: rust
+                  shared-key: rust-wasm
+
+            - name: Install dependencies
+              run: |
+                  npm ci --prefix server/workers
+                  npm ci --prefix web
+                  npm ci --prefix docs
+
+            - name: Test deployment configuration
+              run: node --test server/workers/deploy.test.mjs
+
+            - name: Build frontend Wasm
+              working-directory: web
+              run: npm run build:wasm
+
+            - name: Build web apps and docs
+              run: |
+                  apps=$(node --input-type=module -e 'import {apps} from "./server/workers/deploy.mjs"; console.log(apps.filter(app => app !== "docs").join(" "));')
+                  for app in $apps; do
+                      if [ "$app" = payments ]; then
+                          npm run build --prefix web --workspace payments
+                      else
+                          (cd web && npm exec --workspace "$app" -- next build --webpack)
+                          npm run build:post --prefix web --workspace "$app" --if-present
+                      fi
+                  done
+                  npm run build --prefix docs
+
+            - name: Build and test Museum
+              working-directory: server/workers
+              run: |
+                  npm run build
+                  npm run test:wasm
+                  node --test request.test.mjs test-live.test.mjs deploy.test.mjs
+
+            - name: Deploy Museum and all frontend Workers
+              env:
+                  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+              run: |
+                  node server/workers/deploy.mjs museum
+                  apps=$(node --input-type=module -e 'import {apps} from "./server/workers/deploy.mjs"; console.log(apps.join(" "));')
+                  for app in $apps; do
+                      node server/workers/deploy.mjs "$app"
+                  done
+
+            - name: Verify live Museum API
+              run: node server/workers/test-live.mjs "$ENTE_WORKERS_API_ORIGIN"
+
+            - name: Verify frontend Workers
+              run: |
+                  apps=$(node --input-type=module -e 'import {apps} from "./server/workers/deploy.mjs"; console.log(apps.join(" "));')
+                  for app in $apps; do
+                      curl --fail --location --silent --show-error --retry 5 --retry-delay 5 --output /dev/null "https://${ENTE_WEB_WORKER_PREFIX}-${app}.${ENTE_WORKERS_SUBDOMAIN}.workers.dev/"
+                  done

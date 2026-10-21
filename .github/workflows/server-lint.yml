@@ -45,4 +45,4 @@ jobs:
                   npm ci
                   npm run build
                   npm run test:wasm
-                  node --test request.test.mjs test-live.test.mjs
+                  node --test request.test.mjs test-live.test.mjs deploy.test.mjs
