@@ -204,6 +204,6 @@ func TestPostgresMigrationTrack(t *testing.T) {
 	var version int
 	var dirty bool
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty))
-	require.Equal(t, 153, version)
+	require.Equal(t, 154, version)
 	require.False(t, dirty)
 }

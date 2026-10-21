@@ -44,7 +44,7 @@ func TestMuseumSchemaParity(t *testing.T) {
 	var version int
 	var dirty bool
 	require.NoError(t, sqlite.QueryRow(`SELECT version,dirty FROM schema_migrations`).Scan(&version, &dirty))
-	require.Equal(t, 153, version)
+	require.Equal(t, 154, version)
 	require.False(t, dirty)
 	// Every connection must enforce foreign keys, even after the pool expands.
 	conn, err := sqlite.Conn(ctx)

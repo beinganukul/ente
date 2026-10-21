@@ -74,7 +74,9 @@ func (r *NotificationsRepository) List(ctx context.Context, recipientSpaceID, cu
 	query += ` ORDER BY created_at DESC, notification_id DESC LIMIT $` + strconv.Itoa(len(args)) + database.SQL(r.DB, `
 	), grouped AS MATERIALIZED (
 		SELECT visible.kind, visible.group_id,
-			ARRAY_AGG(visible.notification_id) AS notification_ids,
+			COALESCE(ARRAY_AGG(visible.notification_id) FILTER (
+				WHERE visible.kind <> 'poke' OR visible.read_at IS NULL
+			), '{}') AS notification_ids,
 			CASE WHEN visible.kind = 'post_like' THEN COUNT(*) ELSE 1 END AS actor_count,
 			BOOL_OR(visible.read_at IS NULL) AS unread
 		FROM visible
@@ -84,7 +86,9 @@ func (r *NotificationsRepository) List(ctx context.Context, recipientSpaceID, cu
 	SELECT page.notification_id, grouped.notification_ids, page.kind, page.post_id, page.friend_request_id, page.created_at, grouped.actor_count, grouped.unread, `, `
 	), grouped AS MATERIALIZED (
 		SELECT visible.kind, visible.group_id,
-			json_group_array(visible.notification_id) AS notification_ids,
+			json_group_array(visible.notification_id) FILTER (
+				WHERE visible.kind <> 'poke' OR visible.read_at IS NULL
+			) AS notification_ids,
 			CASE WHEN visible.kind = 'post_like' THEN COUNT(*) ELSE 1 END AS actor_count,
 			MAX(visible.read_at IS NULL) AS unread
 		FROM visible

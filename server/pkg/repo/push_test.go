@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -14,6 +15,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPushNotificationKeyRegistration(t *testing.T) {
+	db := testutil.RequireTestDB(t)
+	testutil.ResetTables(t, db)
+	t.Cleanup(func() { testutil.ResetTables(t, db) })
+	testutil.InsertUser(t, db, testutil.UserFixture{UserID: 1, Email: "push-key@example.com", CreationTime: 1})
+	require.NoError(t, (&UserAuthRepository{DB: db}).AddToken(1, ente.Photos, "session", "", ""))
+	hash := sha256.Sum256([]byte("session"))
+	platform := "android"
+	r := &PushTokenRepository{DB: db}
+	request := ente.PushTokenRequest{FCMToken: "device", Platform: &platform}
+	for _, key := range [][]byte{bytes.Repeat([]byte{1}, 1216), bytes.Repeat([]byte{2}, 1216), nil} {
+		request.NotificationKey = key
+		require.NoError(t, r.AddToken(1, hash[:], request))
+		var stored []byte
+		require.NoError(t, db.QueryRow(`SELECT notification_public_key FROM push_tokens WHERE fcm_token = $1`, request.FCMToken).Scan(&stored))
+		require.Equal(t, key, stored)
+	}
+	request.NotificationKey = []byte{1}
+	require.Error(t, r.AddToken(1, hash[:], request), "both database migrations must reject malformed key lengths")
+}
 
 func TestPushTokenRegistrationMigration(t *testing.T) {
 	testutil.WithServerRoot(t)
