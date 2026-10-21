@@ -223,9 +223,16 @@ test("Album and embed exports serve robots.txt before public-link rewrites", asy
                 join(config.assets.directory, "index.html"),
                 "public album",
             );
+            const robotsContent = readFileSync(
+                new URL(
+                    `../../web/apps/${app}/public/robots.txt`,
+                    import.meta.url,
+                ),
+                "utf8",
+            );
             writeFileSync(
                 join(config.assets.directory, "robots.txt"),
-                "User-agent: *\nDisallow: /\n",
+                robotsContent,
             );
             prepareAssets(app, config, env);
             const filename = join(directory, `${app}.json`);
@@ -239,10 +246,7 @@ test("Album and embed exports serve robots.txt before public-link rewrites", asy
                     "http://localhost/robots.txt",
                 );
                 assert.equal(robots.status, 200);
-                assert.equal(
-                    await robots.text(),
-                    "User-agent: *\nDisallow: /\n",
-                );
+                assert.equal(await robots.text(), robotsContent);
                 const link = await worker.fetch(
                     "http://localhost/public-token",
                     { redirect: "manual" },
